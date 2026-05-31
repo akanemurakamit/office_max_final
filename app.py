@@ -858,13 +858,8 @@ def ensure_historical_pricing_ready() -> bool:
 
     analysis_key = _analysis_key()
     elasticity_key = st.session_state.get("elasticity_analysis_key") or st.session_state.get("elasticity_cache_key")
+
     if not _cache_key_matches_analysis(elasticity_key, analysis_key):
-    analysis_key = (
-        st.session_state.get("sales_signature"),
-        st.session_state.get("nse_signature"),
-        st.session_state.get("promo_signature"),
-    )
-    if st.session_state.get("elasticity_cache_key") != analysis_key:
         st.warning(
             "La elasticidad guardada no corresponde a la base actual. Recalcula elasticidad en la vista **2. Elasticidad**."
         )
