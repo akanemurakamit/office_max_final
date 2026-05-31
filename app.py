@@ -296,6 +296,30 @@ def _filter_fast(df: pd.DataFrame, col: str | None, value: object) -> pd.DataFra
     return df.loc[df[col].astype(str) == str(value)]
 
 
+def _analysis_key() -> tuple:
+    """Clave estable de la base vigente: ventas + NSE + promociones."""
+    return (
+        st.session_state.get("sales_signature"),
+        st.session_state.get("nse_signature"),
+        st.session_state.get("promo_signature"),
+    )
+
+
+def _cache_key_matches_analysis(cache_key: object, analysis_key: tuple) -> bool:
+    """Valida compatibilidad aunque la clave de elasticidad tenga sufijos de versión.
+
+    La elasticidad se cachea con un sufijo interno de versión para invalidar cálculos
+    viejos, mientras que pricing solo necesita confirmar que ventas/NSE/promos son
+    las mismas. Por eso se acepta tanto la clave exacta histórica de 3 elementos
+    como la clave actual extendida cuyo prefijo coincide.
+    """
+    if cache_key == analysis_key:
+        return True
+    if isinstance(cache_key, tuple) and len(cache_key) >= len(analysis_key):
+        return cache_key[: len(analysis_key)] == analysis_key
+    return False
+
+
 def _dependent_selectbox(
     label: str,
     options: list[str],
@@ -377,6 +401,7 @@ def init_state() -> None:
         "nse_signature": "default_nse",
         "quality_cache_key": None,
         "elasticity_cache_key": None,
+        "elasticity_analysis_key": None,
         "pricing_cache_key": None,
         "historical_pricing_cache_key": None,
         "manual_cache": {"quality": {}, "elasticity": {}, "pricing": {}, "historical_pricing": {}},
@@ -399,6 +424,9 @@ def reset_model_results() -> None:
     st.session_state.simulacion = pd.DataFrame()
     st.session_state.resumen_pricing = pd.DataFrame()
     st.session_state.pricing_historico_escenarios = pd.DataFrame()
+    st.session_state.elasticity_cache_key = None
+    st.session_state.elasticity_analysis_key = None
+    st.session_state.pricing_cache_key = None
     st.session_state.historical_pricing_cache_key = None
 
 
@@ -682,6 +710,7 @@ def ensure_elasticity_ready(show_button: bool = True) -> bool:
             cache[cache_key] = (elasticidad, ventas_base_elasticidad, bloques)
 
         st.session_state.elasticity_cache_key = cache_key
+        st.session_state.elasticity_analysis_key = cache_key[:3]
         st.session_state.elasticidad = elasticidad
         elasticidades_periodo = elasticidad.attrs.get(
             "elasticidades_periodo",
@@ -735,11 +764,7 @@ def ensure_pricing_ready() -> bool:
         )
         return False
 
-    analysis_key = (
-        st.session_state.get("sales_signature"),
-        st.session_state.get("nse_signature"),
-        st.session_state.get("promo_signature"),
-    )
+    analysis_key = _analysis_key()
 
     if (
         not st.session_state.get("elasticity_ready", False)
@@ -752,7 +777,8 @@ def ensure_pricing_ready() -> bool:
         )
         return False
 
-    if st.session_state.get("elasticity_cache_key") != analysis_key:
+    elasticity_key = st.session_state.get("elasticity_analysis_key") or st.session_state.get("elasticity_cache_key")
+    if not _cache_key_matches_analysis(elasticity_key, analysis_key):
         st.warning(
             "La elasticidad guardada no corresponde a la base actual de ventas + NSE + promociones. "
             "Vuelve a calcular elasticidad en la vista **2. Elasticidad** antes de calcular pricing."
@@ -830,6 +856,9 @@ def ensure_historical_pricing_ready() -> bool:
         )
         return False
 
+    analysis_key = _analysis_key()
+    elasticity_key = st.session_state.get("elasticity_analysis_key") or st.session_state.get("elasticity_cache_key")
+    if not _cache_key_matches_analysis(elasticity_key, analysis_key):
     analysis_key = (
         st.session_state.get("sales_signature"),
         st.session_state.get("nse_signature"),
