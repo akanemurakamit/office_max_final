@@ -22,6 +22,7 @@ from .config import (
     MIN_PRECIOS_DISTINTOS,
     USE_RANDOM_FOREST_CLASSIFIER,
 )
+from .promotions import DEMANDA_BASE_BAJA_MINIMA
 from .utils import format_money, format_num, format_pct, normalizar_categoria_est_socio, parse_transaction_dates
 
 
@@ -374,6 +375,8 @@ def _select_best_scenario_vectorized(simulacion: pd.DataFrame) -> pd.DataFrame:
     base_rows = tmp_base.sort_values(group_cols + ["_abs_change"], kind="stable").drop_duplicates(group_cols)
 
     valid = sim.dropna(subset=["Unidades_Simuladas", "Ingreso_Simulado", "Margen_Simulado"]).copy()
+    if "Riesgo_Promocion" in valid.columns:
+        valid = valid[~(valid["Tipo_Escenario"].eq("Promoción") & valid["Riesgo_Promocion"].eq("Alto"))].copy()
     if valid.empty:
         resumen = base_rows.copy()
         resumen["Criterio_Escenario_Ideal"] = "Sin recomendación por datos insuficientes o baja confianza"
@@ -434,6 +437,8 @@ def _select_best_scenario_vectorized(simulacion: pd.DataFrame) -> pd.DataFrame:
 
     # Métricas máximas por grupo, también vectorizadas.
     valid = sim.dropna(subset=["Unidades_Simuladas", "Ingreso_Simulado", "Margen_Simulado"]).copy()
+    if "Riesgo_Promocion" in valid.columns:
+        valid = valid[~(valid["Tipo_Escenario"].eq("Promoción") & valid["Riesgo_Promocion"].eq("Alto"))].copy()
     if valid.empty:
         max_unidades = base_rows[group_cols + ["Nombre_Escenario", "Unidades_Simuladas"]].rename(columns={"Nombre_Escenario": "Escenario_Max_Unidades", "Unidades_Simuladas": "Unidades_Max"})
         max_ingreso = base_rows[group_cols + ["Nombre_Escenario", "Ingreso_Simulado"]].rename(columns={"Nombre_Escenario": "Escenario_Max_Ingreso", "Ingreso_Simulado": "Ingreso_Max"})
@@ -527,13 +532,26 @@ def simulate_pricing_scenarios(
     simulacion["Elasticidad_Usada"] = np.where(valid, elasticidad_usada, np.nan)
     simulacion["Elasticidad_Capada"] = np.where(valid, elasticidad_usada != elasticidad_original, False)
 
+    promo_mask = simulacion["Tipo_Escenario"].eq("Promoción")
+    cambio_unidades_pct = elasticidad_usada * cambio
     simulacion["Unidades_Simuladas"] = np.where(
-        valid,
-        unidades_base * np.exp(elasticidad_usada * np.log1p(cambio)),
-        np.nan,
+        valid & promo_mask,
+        unidades_base * (1 + cambio_unidades_pct),
+        np.where(valid, unidades_base * np.exp(elasticidad_usada * np.log1p(cambio)), np.nan),
     )
     simulacion["Ingreso_Simulado"] = simulacion["Precio_Nuevo"] * simulacion["Unidades_Simuladas"]
     simulacion["Margen_Simulado"] = (simulacion["Precio_Nuevo"] - costo_unitario) * simulacion["Unidades_Simuladas"]
+    simulacion["Riesgo_Promocion"] = "No aplica"
+    promo_alto = promo_mask & (
+        elasticidad_original.isna()
+        | ~np.isfinite(elasticidad_original)
+        | elasticidad_original.ge(0)
+        | unidades_base.lt(DEMANDA_BASE_BAJA_MINIMA)
+        | costo_unitario.ge(simulacion["Precio_Nuevo"])
+        | simulacion["Margen_Simulado"].lt(0)
+    )
+    simulacion.loc[promo_mask & ~promo_alto, "Riesgo_Promocion"] = "Bajo"
+    simulacion.loc[promo_alto, "Riesgo_Promocion"] = "Alto"
 
     for col in ["Unidades_Simuladas", "Ingreso_Simulado", "Margen_Simulado"]:
         simulacion[col] = pd.to_numeric(simulacion[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
@@ -549,6 +567,15 @@ def simulate_pricing_scenarios(
     simulacion = simulacion.rename(columns={"Cambio_Efectivo": "Cambio_Precio"})
     simulacion["Cambio_Precio_%"] = simulacion["Cambio_Precio"] * 100
     simulacion["Descuento_Equivalente_%"] = np.where(simulacion["Cambio_Precio"] < 0, simulacion["Cambio_Precio"].abs() * 100, 0)
+    # Especificación Fase 6: tipo_escenario es "simple" o "promocional".
+    es_promo = simulacion["Mecanica_Promocion"].isin(["2x1", "3x2", "2do al 50%"])
+    simulacion["tipo_escenario"] = np.where(es_promo, "promocional", "simple")
+    simulacion["nombre_escenario"] = simulacion["Nombre_Escenario"]
+    simulacion["precio_lista"] = simulacion["Precio_Base"]
+    simulacion["precio_efectivo"] = simulacion["Precio_Nuevo"]
+    simulacion["descuento_efectivo"] = simulacion["Descuento_Equivalente_%"]
+    simulacion["cambio_precio_pct"] = simulacion["Cambio_Precio_%"]
+    simulacion["riesgo_promocion"] = simulacion["Riesgo_Promocion"]
 
     if "Tiene_Promocion" not in simulacion.columns:
         simulacion["Tiene_Promocion"] = simulacion.get("tiene_promocion", np.nan)
@@ -571,7 +598,7 @@ def simulate_pricing_scenarios(
         "Categoria_Regla", "Categoria_RF", "Probabilidad_RF_Max", "Elasticidad",
         "Beta", "R2", "P_Value", "Observaciones", "Precios_Distintos",
         "Tiene_Promocion", "Num_Promociones", "Escenario_ID", "Nombre_Escenario",
-        "Nombre_Corto", "Tipo_Escenario", "Mecanica_Promocion", "Cambio_Precio",
+        "Nombre_Corto", "Tipo_Escenario", "Mecanica_Promocion", "Riesgo_Promocion", "Cambio_Precio",
         "Cambio_Precio_%", "Descuento_Equivalente_%", "Precio_Base", "Precio_Nuevo",
         "Costo_Unitario_Base", "Unidades_Base", "Unidades_Simuladas",
         "Cambio_Unidades", "Cambio_Unidades_%", "Ingreso_Base", "Ingreso_Simulado",
@@ -650,6 +677,13 @@ def build_pricing_downloads(simulacion: pd.DataFrame, resumen: pd.DataFrame) -> 
             "unidades simuladas": _series_or_na(exp, "Unidades_Simuladas"),
             "ingreso simulado": _series_or_na(exp, "Ingreso_Simulado"),
             "margen simulado": _series_or_na(exp, "Margen_Simulado"),
+            "tipo escenario": _series_or_na(exp, "Tipo_Escenario"),
+            "mecánica promoción": _series_or_na(exp, "Mecanica_Promocion"),
+            "riesgo promoción": _series_or_na(exp, "Riesgo_Promocion"),
+            "tipo_escenario": _series_or_na(exp, "tipo_escenario"),
+            "precio lista": _series_or_na(exp, "precio_lista"),
+            "precio efectivo": _series_or_na(exp, "Precio_Nuevo"),
+            "descuento efectivo %": _series_or_na(exp, "Descuento_Equivalente_%"),
             "mejor escenario": _series_or_na(exp, "Escenario_Ideal"),
             "categoría de SKU": _series_or_na(exp, "Categoria_RF"),
         }
@@ -673,6 +707,9 @@ def build_pricing_downloads(simulacion: pd.DataFrame, resumen: pd.DataFrame) -> 
             "ingreso simulado": _series_or_na(best, "Ingreso_Simulado_Ideal"),
             "margen simulado": _series_or_na(best, "Margen_Simulado_Ideal"),
             "mejor escenario": _series_or_na(best, "Escenario_Ideal"),
+            "tipo escenario": _series_or_na(best, "Tipo_Escenario_Ideal"),
+            "mecánica promoción": _series_or_na(best, "Mecanica_Promocion_Ideal"),
+            "precio efectivo": _series_or_na(best, "Precio_Nuevo_Ideal"),
         }
     )
 
