@@ -299,12 +299,18 @@ def build_demanda_base_futura(
     horizontes: list[str] | None = None,
     metodos: list[str] | None = None,
     pesos_config: dict | None = None,
+    mes_inicio_proyeccion: str | pd.Period | None = None,
 ) -> pd.DataFrame:
     """Construye la tabla interna ``demanda_base_futura``.
 
     La proyección estima unidades base futuras con el precio actual. No usa ni
     recalcula elasticidad. Para ventanas faltantes, redistribuye el peso entre
     las ventanas disponibles, baja/confirma la confianza y registra la razón.
+
+    ``mes_inicio_proyeccion`` (opcional, "YYYY-MM" o Period mensual) permite elegir
+    el primer mes a proyectar. Si no se da, se proyecta a partir del mes siguiente
+    al último con datos. El horizonte (1 o 3 meses) define cuántos meses
+    consecutivos se cubren desde ese inicio.
     """
     monthly = _prepare_monthly_sales(ventas)
     if monthly.empty:
@@ -320,6 +326,18 @@ def build_demanda_base_futura(
                 pesos[horizonte][_normalize_method(method)] = weights
 
     last_month = monthly["mes"].max()
+    # Mes de inicio elegido por el usuario (o el mes siguiente al último dato).
+    if mes_inicio_proyeccion is not None:
+        try:
+            target_start_global = pd.Period(str(mes_inicio_proyeccion), freq="M")
+        except Exception:
+            target_start_global = last_month + 1
+    else:
+        target_start_global = last_month + 1
+    # El "ancla" histórica es el mes anterior al inicio de proyección, para que las
+    # ventanas (últimos N meses, mismo mes histórico, etc.) se midan correctamente.
+    anchor_month = target_start_global - 1
+
     rows = []
     for sku, sku_monthly in monthly.groupby("SKU", observed=True, sort=False):
         sku_monthly = sku_monthly.sort_values("mes")
@@ -330,9 +348,9 @@ def build_demanda_base_futura(
             if horizonte not in HORIZONTES_DEMANDA_FUTURA:
                 raise ValueError(f"Horizonte no soportado: {horizonte}")
             value_key = "valor_1m" if horizonte == "1 mes" else "valor_3m"
-            target_start = last_month + 1
-            start_date, end_date = _projection_dates(last_month, horizonte)
-            components = _sku_components(sku_monthly, last_month, target_start)
+            target_start = target_start_global
+            start_date, end_date = _projection_dates(anchor_month, horizonte)
+            components = _sku_components(sku_monthly, anchor_month, target_start)
 
             for metodo in requested_methods:
                 raw_weights = _weights_for_method(horizonte, metodo, pesos)
