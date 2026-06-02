@@ -149,24 +149,65 @@ def razon_promocion_no_margen(costo_unitario) -> pd.Series | bool:
     return pd.isna(costo_unitario)
 
 
-# Columnas candidatas para detectar la base de promociones opcional subida por el usuario.
-_PROMO_COLS_SKU = ["prod_nbr", "SKU", "sku", "producto", "product_id", "item_id"]
-_PROMO_COLS_INICIO = [
-    "fecha_inicio", "inicio_promocion", "fecha_ini", "start_date", "Start_Date",
-    "tran_date", "fecha",
-]
-_PROMO_COLS_FIN = [
-    "fecha_fin", "fin_promocion", "fecha_final", "end_date", "End_Date",
-    "fecha_termino", "fecha_término",
-]
+# Nombres canónicos (ya normalizados: minúsculas, sin acentos, espacios->_) para
+# detectar columnas de la base de promociones opcional, sin importar mayúsculas,
+# acentos ni espacios en el archivo del usuario.
+_PROMO_SKU_CANON = {
+    "prod_nbr", "sku", "producto", "product_id", "item_id", "id_producto",
+    "codigo", "codigo_producto", "clave", "clave_producto",
+}
+_PROMO_INICIO_CANON = {
+    "fecha_inicio", "inicio_promocion", "fecha_ini", "start_date", "tran_date",
+    "fecha", "fecha_de_inicio", "inicio", "fecha_inicio_promocion",
+    "desde", "fecha_desde",
+}
+_PROMO_FIN_CANON = {
+    "fecha_fin", "fin_promocion", "fecha_final", "end_date", "fecha_termino",
+    "fecha_de_fin", "fin", "fecha_fin_promocion", "hasta", "fecha_hasta",
+}
+_PROMO_MECANICA_CANON = {
+    "mecanica", "tipo_promo", "tipo_promocion", "promo", "promocion",
+    "descripcion", "mecanica_promocion", "2x1", "3x2",
+}
+
+
+def _normalizar_nombre_columna(nombre: str) -> str:
+    """minúsculas, sin acentos y espacios/guiones -> guion bajo."""
+    import unicodedata
+
+    texto = str(nombre).strip().lower()
+    texto = "".join(
+        c for c in unicodedata.normalize("NFKD", texto) if not unicodedata.combining(c)
+    )
+    for ch in (" ", "-", ".", "/"):
+        texto = texto.replace(ch, "_")
+    while "__" in texto:
+        texto = texto.replace("__", "_")
+    return texto.strip("_")
+
+
+def _detectar_columna(promos: pd.DataFrame, candidatos: set) -> str | None:
+    """Devuelve el nombre ORIGINAL de la primera columna cuyo nombre normalizado
+    coincida (exacto o por inclusión) con alguno de los candidatos."""
+    mapa = {col: _normalizar_nombre_columna(col) for col in promos.columns}
+    # 1) coincidencia exacta normalizada
+    for original, norm in mapa.items():
+        if norm in candidatos:
+            return original
+    # 2) coincidencia por inclusión (p. ej. "fecha_inicio_promo" contiene "fecha_inicio")
+    for original, norm in mapa.items():
+        if any(cand in norm for cand in candidatos):
+            return original
+    return None
 
 
 def normalizar_ventanas_promocion(promociones: "pd.DataFrame | None") -> pd.DataFrame:
     """Normaliza la base de promociones a ventanas (SKU, fecha_inicio, fecha_fin).
 
     Devuelve un DataFrame con columnas ``SKU``, ``fecha_inicio``, ``fecha_fin`` y,
-    si existe, ``mecanica``. Detecta de forma flexible los nombres de columna. Si no
-    se reconoce SKU o fecha de inicio, devuelve un DataFrame vacío (nunca crashea).
+    si existe, ``mecanica``. Detecta los nombres de columna de forma flexible
+    (insensible a mayúsculas, acentos y espacios). Si no reconoce SKU o fecha de
+    inicio, devuelve un DataFrame vacío (nunca crashea).
     """
     from .utils import parse_transaction_dates
 
@@ -177,13 +218,13 @@ def normalizar_ventanas_promocion(promociones: "pd.DataFrame | None") -> pd.Data
     promos = promociones.copy()
     promos.columns = promos.columns.astype(str).str.strip()
 
-    col_sku = next((c for c in _PROMO_COLS_SKU if c in promos.columns), None)
-    col_inicio = next((c for c in _PROMO_COLS_INICIO if c in promos.columns), None)
+    col_sku = _detectar_columna(promos, _PROMO_SKU_CANON)
+    col_inicio = _detectar_columna(promos, _PROMO_INICIO_CANON)
     if col_sku is None or col_inicio is None:
         return pd.DataFrame(columns=columnas)
 
-    col_fin = next((c for c in _PROMO_COLS_FIN if c in promos.columns), None)
-    col_mecanica = next((c for c in ["mecanica", "mecánica", "tipo_promo", "promo", "descripcion", "2x1", "3x2"] if c in promos.columns), None)
+    col_fin = _detectar_columna(promos, _PROMO_FIN_CANON)
+    col_mecanica = _detectar_columna(promos, _PROMO_MECANICA_CANON)
 
     out = pd.DataFrame()
     out["SKU"] = promos[col_sku].astype("string").str.strip().astype(str)
