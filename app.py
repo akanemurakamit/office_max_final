@@ -146,30 +146,85 @@ def calculate_elasticity_cached(
     return calculate_elasticity(ventas_nse, promo_df)
 
 
+def simulate_historical_pricing_cached(
+    ventas_historicas: pd.DataFrame,
+    elasticidades_periodo: pd.DataFrame,
+) -> pd.DataFrame:
+    """Simula pricing histórico con caché sin calcular demanda futura."""
+    from modules.historical_pricing import build_pricing_historico_escenarios
+
+    return build_pricing_historico_escenarios(ventas_historicas, elasticidades_periodo)
+
+
 def simulate_pricing_cached(
     ventas_base_elasticidad: pd.DataFrame,
     elasticidad: pd.DataFrame,
     bloques: list[dict],
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Simula escenarios de pricing con caché.
-
-    Se ejecuta solo desde la vista 3.
-    """
+    """Simula escenarios de pricing legacy; la vista activa usa pricing histórico."""
     from modules.pricing import simulate_pricing_scenarios
 
     return simulate_pricing_scenarios(ventas_base_elasticidad, elasticidad, bloques)
 
 
-@st.cache_data(show_spinner=False, max_entries=5)
-def simulate_historical_pricing_cached(
+def build_demand_forecast_cached(
     ventas_nse: pd.DataFrame,
-    elasticidades_periodo: pd.DataFrame,
+    metodos: tuple[str, ...] | None = None,
+    horizontes: tuple[str, ...] | None = None,
+    pesos_manual: tuple[tuple[str, float], ...] | None = None,
 ) -> pd.DataFrame:
-    """Construye pricing_historico_escenarios con caché sin recalcular filtros."""
-    from modules.historical_pricing import simulate_historical_pricing_scenarios
+    """Calcula demanda_base_futura sin recalcular elasticidad ni aplicar promociones.
 
-    return simulate_historical_pricing_scenarios(ventas_nse, elasticidades_periodo)
+    Los parámetros de método/horizonte/ventanas se pasan como tuplas para que el
+    caché de Streamlit pueda hashearlos. ``pesos_manual`` permite a la vista 4
+    sobreescribir las ventanas del método "Manual avanzado" sin tocar el motor.
+    """
+    from modules.demand_forecast import build_demanda_base_futura
+
+    pesos_config = None
+    if pesos_manual:
+        pesos_dict = {k: v for k, v in pesos_manual}
+        if pesos_dict:
+            pesos_config = {
+                "1 mes": {"Manual avanzado": pesos_dict},
+                "3 meses": {"Manual avanzado": pesos_dict},
+            }
+    return build_demanda_base_futura(
+        ventas_nse,
+        horizontes=list(horizontes) if horizontes else None,
+        metodos=list(metodos) if metodos else None,
+        pesos_config=pesos_config,
+    )
+
+
+@st.cache_data(show_spinner=False, max_entries=5)
+def build_future_pricing_cached(
+    demanda_base_futura: pd.DataFrame,
+    elasticidades_periodo: pd.DataFrame,
+    ventas_nse: pd.DataFrame,
+) -> pd.DataFrame:
+    """Simula pricing futuro usando demanda_base_futura y elasticidades ya calculadas."""
+    from modules.future_pricing import build_pricing_futuro_escenarios
+
+    return build_pricing_futuro_escenarios(demanda_base_futura, elasticidades_periodo, ventas_nse)
+
+
+@st.cache_data(show_spinner=False, max_entries=5)
+def build_recommendations_cached(
+    pricing_futuro_escenarios: pd.DataFrame,
+    elasticidades_periodo: pd.DataFrame,
+    demanda_base_futura: pd.DataFrame,
+    ventas_nse: pd.DataFrame,
+) -> pd.DataFrame:
+    """Fase 7: motor de recomendaciones híbrido (reglas + simulación; RF opcional desactivado)."""
+    from modules.recommendations import generar_recomendaciones
+
+    return generar_recomendaciones(
+        pricing_futuro_escenarios,
+        elasticidades_periodo,
+        demanda_base_futura,
+        ventas_nse,
+    )
 
 
 @st.cache_data(show_spinner=False, max_entries=5)
@@ -183,34 +238,49 @@ def build_historical_sales_ml_cached(ventas_nse: pd.DataFrame) -> dict:
 @st.cache_data(show_spinner=False, max_entries=10)
 def build_elasticity_curve_data(
     curva_df: pd.DataFrame,
-    min_price: float,
-    max_price: float,
-    max_skus: int,
+    max_skus: int = 8,
 ) -> pd.DataFrame:
-    """Construye datos para la curva de elasticidad usando caché."""
+    """Construye la curva precio-demanda log-log por SKU desde elasticidades_periodo.
+
+    Usa la forma constante de elasticidad: Q(P) = unidades_promedio * (P/precio_promedio)^elasticidad.
+    Genera un rango de precios alrededor del precio promedio observado de cada SKU.
+    Devuelve columnas: SKU, periodo, Precio, "Demanda estimada".
+    """
     import numpy as np
 
     if curva_df is None or curva_df.empty:
         return pd.DataFrame()
 
-    precios = np.linspace(max(0.01, float(min_price)), max(0.02, float(max_price)), 60)
+    requeridas = {"SKU", "elasticidad", "precio_promedio", "unidades_promedio"}
+    if not requeridas.issubset(curva_df.columns):
+        return pd.DataFrame()
+
+    base = curva_df.copy()
+    base["elasticidad"] = pd.to_numeric(base["elasticidad"], errors="coerce")
+    base["precio_promedio"] = pd.to_numeric(base["precio_promedio"], errors="coerce")
+    base["unidades_promedio"] = pd.to_numeric(base["unidades_promedio"], errors="coerce")
+    base = base.dropna(subset=["elasticidad", "precio_promedio", "unidades_promedio"])
+    base = base[(base["precio_promedio"] > 0) & (base["unidades_promedio"] > 0)]
+    if base.empty:
+        return pd.DataFrame()
+
     curva_rows = []
-    for _, row in curva_df.head(max_skus).iterrows():
-        alfa = row.get("Alfa")
-        beta = row.get("Elasticidad")
+    for _, row in base.head(max_skus).iterrows():
+        beta = float(row["elasticidad"])
+        p0 = float(row["precio_promedio"])
+        q0 = float(row["unidades_promedio"])
         sku = row.get("SKU")
-        trimestre = row.get("trimestre")
-        if pd.isna(alfa) or pd.isna(beta):
-            continue
+        periodo = row.get("periodo", "")
+        precios = np.linspace(p0 * 0.6, p0 * 1.4, 50)
         for precio in precios:
-            demanda = np.exp(alfa + beta * np.log(precio))
-            if np.isfinite(demanda):
+            demanda = q0 * (precio / p0) ** beta
+            if np.isfinite(demanda) and demanda >= 0:
                 curva_rows.append(
                     {
-                        "SKU": sku,
+                        "SKU": str(sku),
+                        "periodo": str(periodo),
                         "Precio": precio,
                         "Demanda estimada": demanda,
-                        "trimestre": trimestre,
                     }
                 )
     return pd.DataFrame(curva_rows)
@@ -222,15 +292,36 @@ def aggregate_weekly_demand(ventas_f: pd.DataFrame) -> pd.DataFrame:
     if ventas_f is None or ventas_f.empty:
         return pd.DataFrame()
 
-    if "tiene_promocion" in ventas_f.columns and ventas_f["tiene_promocion"].sum() > 0:
+    df = ventas_f.copy()
+    # tran_date puede llegar como string (dd/mm/YYYY); pd.Grouper(freq="W") exige
+    # datetime, de lo contrario el gráfico sale vacío o roto. Se normaliza primero.
+    if "tran_date" not in df.columns or "qty" not in df.columns:
+        return pd.DataFrame()
+    if not pd.api.types.is_datetime64_any_dtype(df["tran_date"]):
+        from modules.utils import parse_transaction_dates
+
+        df["tran_date"] = parse_transaction_dates(df["tran_date"])
+    df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
+    df = df.dropna(subset=["tran_date", "qty"])
+    if df.empty:
+        return pd.DataFrame()
+
+    if "tiene_promocion" in df.columns and pd.to_numeric(df["tiene_promocion"], errors="coerce").fillna(0).sum() > 0:
         serie = (
-            ventas_f.groupby([pd.Grouper(key="tran_date", freq="W"), "tiene_promocion"], as_index=False)
+            df.groupby([pd.Grouper(key="tran_date", freq="W"), "tiene_promocion"])
             .agg(Demanda=("qty", "sum"))
+            .reset_index()
         )
         serie["Promoción"] = serie["tiene_promocion"].map({1: "Con promoción", 0: "Sin promoción"}).fillna("Sin promoción")
         return serie
 
-    return ventas_f.groupby(pd.Grouper(key="tran_date", freq="W"), as_index=False).agg(Demanda=("qty", "sum"))
+    # reset_index explícito: con un único Grouper, as_index=False no siempre
+    # devuelve tran_date como columna, dejando la serie sin eje X.
+    return (
+        df.groupby(pd.Grouper(key="tran_date", freq="W"))
+        .agg(Demanda=("qty", "sum"))
+        .reset_index()
+    )
 
 
 @st.cache_data(show_spinner=False, max_entries=10)
@@ -275,6 +366,33 @@ def aggregate_pricing_chart_data(selected: pd.DataFrame) -> tuple[pd.DataFrame, 
     return money_long, qty_long, im_long
 
 
+# Orden lógico de escenarios de precio: primero los decrementos (de mayor a menor
+# descuento), luego mantener, luego los incrementos, y al final las promociones.
+_ORDEN_ESCENARIOS = [
+    "bajar precio 20%",
+    "bajar precio 15%",
+    "bajar precio 10%",
+    "bajar precio 5%",
+    "mantener precio",
+    "subir precio 5%",
+    "subir precio 10%",
+    "subir precio 15%",
+    "subir precio 20%",
+    "promoción 2x1",
+    "promoción 3x2",
+    "promoción segundo producto al 50%",
+]
+_ORDEN_ESCENARIOS_INDEX = {nombre: i for i, nombre in enumerate(_ORDEN_ESCENARIOS)}
+
+
+def _sort_escenarios(valores: list[str]) -> list[str]:
+    """Ordena nombres de escenario por lógica de precio (decremento -> incremento)."""
+    conocidos = [v for v in valores if v.lower() in _ORDEN_ESCENARIOS_INDEX]
+    otros = sorted(v for v in valores if v.lower() not in _ORDEN_ESCENARIOS_INDEX)
+    conocidos.sort(key=lambda v: _ORDEN_ESCENARIOS_INDEX[v.lower()])
+    return conocidos + otros
+
+
 def _safe_sorted_options(df: pd.DataFrame, col: str | None) -> list[str]:
     """Devuelve opciones limpias y ordenadas para filtros dependientes."""
     if df is None or df.empty or col is None or col not in df.columns:
@@ -286,7 +404,11 @@ def _safe_sorted_options(df: pd.DataFrame, col: str | None) -> list[str]:
         .map(str.strip)
     )
     values = values[values != ""]
-    return sorted(values.unique().tolist())
+    unicos = values.unique().tolist()
+    # Para columnas de escenario se usa el orden lógico de precio, no el alfabético.
+    if col in {"nombre_escenario", "escenario"}:
+        return _sort_escenarios(unicos)
+    return sorted(unicos)
 
 
 def _filter_fast(df: pd.DataFrame, col: str | None, value: object) -> pd.DataFrame:
@@ -294,30 +416,6 @@ def _filter_fast(df: pd.DataFrame, col: str | None, value: object) -> pd.DataFra
     if df is None or df.empty or col is None or col not in df.columns or value in [None, "Todos", "Todas"]:
         return df
     return df.loc[df[col].astype(str) == str(value)]
-
-
-def _analysis_key() -> tuple:
-    """Clave estable de la base vigente: ventas + NSE + promociones."""
-    return (
-        st.session_state.get("sales_signature"),
-        st.session_state.get("nse_signature"),
-        st.session_state.get("promo_signature"),
-    )
-
-
-def _cache_key_matches_analysis(cache_key: object, analysis_key: tuple) -> bool:
-    """Valida compatibilidad aunque la clave de elasticidad tenga sufijos de versión.
-
-    La elasticidad se cachea con un sufijo interno de versión para invalidar cálculos
-    viejos, mientras que pricing solo necesita confirmar que ventas/NSE/promos son
-    las mismas. Por eso se acepta tanto la clave exacta histórica de 3 elementos
-    como la clave actual extendida cuyo prefijo coincide.
-    """
-    if cache_key == analysis_key:
-        return True
-    if isinstance(cache_key, tuple) and len(cache_key) >= len(analysis_key):
-        return cache_key[: len(analysis_key)] == analysis_key
-    return False
 
 
 def _dependent_selectbox(
@@ -338,10 +436,123 @@ def _dependent_selectbox(
         return st.selectbox(label, options, key=key)
 
 
-def _df_to_excel_friendly_csv_bytes(df: pd.DataFrame, sep: str = ";") -> bytes:
-    """CSV compatible con Excel en configuración regional de México/España.
 
-    Usa UTF-8 con BOM y separador `;` para que Excel abra columnas correctamente.
+ELASTICITY_EXPECTED_COLUMNS = [
+    "SKU",
+    "categoria",
+    "departamento",
+    "periodo_tipo",
+    "periodo",
+    "fecha_inicio",
+    "fecha_fin",
+    "elasticidad",
+    "r2",
+    "p_value",
+    "num_observaciones",
+    "num_precios_distintos",
+    "precio_promedio",
+    "unidades_promedio",
+    "ingreso_promedio",
+    "margen_promedio",
+    "confianza_elasticidad",
+    "recomendable_elasticidad",
+    "razon_no_recomendable",
+]
+
+ELASTICITY_NUMERIC_COLUMNS = [
+    "elasticidad",
+    "r2",
+    "p_value",
+    "num_observaciones",
+    "num_precios_distintos",
+    "precio_promedio",
+    "unidades_promedio",
+    "ingreso_promedio",
+    "margen_promedio",
+    "descuento_efectivo",
+    "cambio_precio_pct",
+]
+
+ELASTICITY_TEXT_COLUMNS = [
+    "SKU",
+    "categoria",
+    "departamento",
+    "periodo_tipo",
+    "periodo",
+    "confianza_elasticidad",
+    "recomendable_elasticidad",
+    "razon_no_recomendable",
+    "fuente_nse",
+    "categoria_est_socio",
+    "nse_match_status",
+]
+
+
+def _stringify_complex_value(value):
+    """Convierte objetos complejos a texto y conserva nulos para casteos posteriores."""
+    if isinstance(value, (list, tuple, dict, set)):
+        return str(value)
+    return value
+
+
+def prepare_dataframe_for_streamlit(
+    df: pd.DataFrame | None,
+    numeric_columns: list[str] | None = None,
+    text_columns: list[str] | None = None,
+    force_text_columns: list[str] | None = None,
+) -> pd.DataFrame:
+    """Normaliza tipos para evitar errores PyArrow/Streamlit al mostrar o exportar tablas."""
+    if df is None:
+        return pd.DataFrame()
+
+    clean = df.copy().replace([np.inf, -np.inf], np.nan)
+    numeric_columns = numeric_columns or []
+    text_columns = text_columns or []
+    force_text_columns = force_text_columns or []
+
+    for col in clean.columns:
+        if clean[col].dtype == "object" or str(clean[col].dtype).startswith("category"):
+            clean[col] = clean[col].map(_stringify_complex_value)
+
+    for col in numeric_columns:
+        if col in clean.columns:
+            clean[col] = pd.to_numeric(clean[col], errors="coerce").replace([np.inf, -np.inf], np.nan)
+
+    for col in text_columns:
+        if col in clean.columns and col not in numeric_columns:
+            clean[col] = clean[col].fillna("").astype(str)
+
+    for col in force_text_columns:
+        if col in clean.columns:
+            clean[col] = clean[col].fillna("").astype(str)
+
+    for col in clean.columns:
+        if clean[col].dtype == "object" or str(clean[col].dtype).startswith("category"):
+            non_null = clean[col].dropna()
+            if not non_null.empty:
+                clean[col] = clean[col].fillna("").astype(str)
+
+    return clean
+
+
+def prepare_elasticity_dataframe_for_display(df: pd.DataFrame | None) -> pd.DataFrame:
+    """Normaliza elasticidades manteniendo métricas numéricas y textos homogéneos."""
+    return prepare_dataframe_for_streamlit(
+        df,
+        numeric_columns=ELASTICITY_NUMERIC_COLUMNS,
+        text_columns=ELASTICITY_TEXT_COLUMNS,
+    )
+
+
+def _empty_elasticity_periodo_frame() -> pd.DataFrame:
+    """Devuelve una tabla vacía segura con el esquema mínimo esperado."""
+    return pd.DataFrame(columns=ELASTICITY_EXPECTED_COLUMNS)
+
+def _df_to_excel_friendly_csv_bytes(df: pd.DataFrame, sep: str = ",") -> bytes:
+    """CSV estándar separado por comas, compatible con Excel y Google Sheets.
+
+    Usa coma como separador (estándar CSV universal) y UTF-8 con BOM para que los
+    acentos se vean bien. Así cada campo cae en su propia columna al abrirlo.
     """
     if df is None or df.empty:
         return b""
@@ -349,7 +560,7 @@ def _df_to_excel_friendly_csv_bytes(df: pd.DataFrame, sep: str = ";") -> bytes:
     return clean.to_csv(index=False, sep=sep, encoding="utf-8-sig", lineterminator="\n").encode("utf-8-sig")
 
 
-def _dataframes_to_zip_csv_bytes(files: dict[str, pd.DataFrame], sep: str = ";") -> bytes:
+def _dataframes_to_zip_csv_bytes(files: dict[str, pd.DataFrame], sep: str = ",") -> bytes:
     """Empaqueta uno o varios DataFrames como CSV dentro de un ZIP en memoria."""
     import io
     import zipfile
@@ -379,6 +590,13 @@ def init_state() -> None:
         "elasticity_ready": False,
         "pricing_ready": False,
         "historical_pricing_ready": False,
+        "demand_forecast_ready": False,
+        "future_pricing_ready": False,
+        "recommendations_ready": False,
+        "recomendaciones_sku": pd.DataFrame(),
+        "future_metodo": "Automático recomendado",
+        "future_horizonte_sel": "Ambos",
+        "future_manual_ventanas": [],
         "ventas_limpias": pd.DataFrame(),
         "ventas_nse": pd.DataFrame(),
         "promo_df": None,
@@ -391,6 +609,8 @@ def init_state() -> None:
         "simulacion": pd.DataFrame(),
         "resumen_pricing": pd.DataFrame(),
         "pricing_historico_escenarios": pd.DataFrame(),
+        "demanda_base_futura": pd.DataFrame(),
+        "pricing_futuro_escenarios": pd.DataFrame(),
         "semaforo": pd.DataFrame(),
         "calidad_varianza": pd.DataFrame(),
         "resumen_limpieza": pd.DataFrame(),
@@ -401,10 +621,8 @@ def init_state() -> None:
         "nse_signature": "default_nse",
         "quality_cache_key": None,
         "elasticity_cache_key": None,
-        "elasticity_analysis_key": None,
         "pricing_cache_key": None,
-        "historical_pricing_cache_key": None,
-        "manual_cache": {"quality": {}, "elasticity": {}, "pricing": {}, "historical_pricing": {}},
+        "manual_cache": {"quality": {}, "elasticity": {}, "pricing": {}, "pricing_historico": {}, "demand_forecast": {}, "pricing_futuro": {}, "recomendaciones": {}},
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -416,6 +634,10 @@ def reset_model_results() -> None:
     st.session_state.elasticity_ready = False
     st.session_state.pricing_ready = False
     st.session_state.historical_pricing_ready = False
+    st.session_state.demand_forecast_ready = False
+    st.session_state.future_pricing_ready = False
+    st.session_state.recommendations_ready = False
+    st.session_state.recomendaciones_sku = pd.DataFrame()
     st.session_state.elasticidad = pd.DataFrame()
     st.session_state.elasticidades_periodo = pd.DataFrame()
     st.session_state.ventas_base_elasticidad = pd.DataFrame()
@@ -424,10 +646,9 @@ def reset_model_results() -> None:
     st.session_state.simulacion = pd.DataFrame()
     st.session_state.resumen_pricing = pd.DataFrame()
     st.session_state.pricing_historico_escenarios = pd.DataFrame()
-    st.session_state.elasticity_cache_key = None
-    st.session_state.elasticity_analysis_key = None
-    st.session_state.pricing_cache_key = None
-    st.session_state.historical_pricing_cache_key = None
+    st.session_state.demanda_base_futura = pd.DataFrame()
+    st.session_state.pricing_futuro_escenarios = pd.DataFrame()
+    st.session_state.recomendaciones_sku = pd.DataFrame()
 
 
 def render_sidebar() -> str:
@@ -440,8 +661,10 @@ def render_sidebar() -> str:
         [
             "1. Carga y diagnóstico de datos",
             "2. Elasticidad",
-            "3. Pricing Histórico",
-            "4. Pricing dinámico + proyección de ventas",
+            "3. Pricing histórico (backtesting)",
+            "4. Pricing futuro (simulador)",
+            "5. Recomendaciones ejecutivas",
+            "6. Exportables",
         ],
     )
 
@@ -518,7 +741,7 @@ def render_sidebar() -> str:
     process = st.sidebar.button("Procesar / actualizar datos", type="primary", use_container_width=True)
     if st.sidebar.button("Limpiar caché de esta sesión", use_container_width=True):
         st.cache_data.clear()
-        st.session_state.manual_cache = {"quality": {}, "elasticity": {}, "pricing": {}, "historical_pricing": {}}
+        st.session_state.manual_cache = {"quality": {}, "elasticity": {}, "pricing": {}, "pricing_historico": {}, "demand_forecast": {}}
         st.session_state.processed = False
         reset_model_results()
         st.sidebar.success("Caché limpiado. Vuelve a procesar la base si lo necesitas.")
@@ -710,7 +933,6 @@ def ensure_elasticity_ready(show_button: bool = True) -> bool:
             cache[cache_key] = (elasticidad, ventas_base_elasticidad, bloques)
 
         st.session_state.elasticity_cache_key = cache_key
-        st.session_state.elasticity_analysis_key = cache_key[:3]
         st.session_state.elasticidad = elasticidad
         elasticidades_periodo = elasticidad.attrs.get(
             "elasticidades_periodo",
@@ -729,6 +951,11 @@ def ensure_elasticity_ready(show_button: bool = True) -> bool:
         st.session_state.elasticity_ready = True
         st.session_state.pricing_ready = False
         st.session_state.historical_pricing_ready = False
+        st.session_state.demand_forecast_ready = False
+        st.session_state.future_pricing_ready = False
+        st.session_state.pricing_historico_escenarios = pd.DataFrame()
+        st.session_state.demanda_base_futura = pd.DataFrame()
+        st.session_state.pricing_futuro_escenarios = pd.DataFrame()
         st.success("Elasticidad calculada correctamente. Cambiar filtros no volverá a calcularla.")
         return True
     except Exception as exc:
@@ -764,7 +991,11 @@ def ensure_pricing_ready() -> bool:
         )
         return False
 
-    analysis_key = _analysis_key()
+    analysis_key = (
+        st.session_state.get("sales_signature"),
+        st.session_state.get("nse_signature"),
+        st.session_state.get("promo_signature"),
+    )
 
     if (
         not st.session_state.get("elasticity_ready", False)
@@ -777,8 +1008,7 @@ def ensure_pricing_ready() -> bool:
         )
         return False
 
-    elasticity_key = st.session_state.get("elasticity_analysis_key") or st.session_state.get("elasticity_cache_key")
-    if not _cache_key_matches_analysis(elasticity_key, analysis_key):
+    if st.session_state.get("elasticity_cache_key") != analysis_key:
         st.warning(
             "La elasticidad guardada no corresponde a la base actual de ventas + NSE + promociones. "
             "Vuelve a calcular elasticidad en la vista **2. Elasticidad** antes de calcular pricing."
@@ -836,7 +1066,7 @@ def ensure_pricing_ready() -> bool:
 
 
 def ensure_historical_pricing_ready() -> bool:
-    """Calcula el backtesting histórico solo con ventas reales y elasticidades_periodo."""
+    """Calcula pricing histórico solo con ventas reales + elasticidades_periodo ya calculadas."""
     if not st.session_state.processed:
         return False
 
@@ -852,16 +1082,20 @@ def ensure_historical_pricing_ready() -> bool:
     ):
         st.warning(
             "Primero calcula la elasticidad en la vista **2. Elasticidad**. "
-            "Pricing Histórico usa únicamente elasticidades ya calculadas desde elasticidades_periodo."
+            "Pricing histórico usa exclusivamente elasticidades ya calculadas desde `elasticidades_periodo`."
         )
         return False
 
-    analysis_key = _analysis_key()
-    elasticity_key = st.session_state.get("elasticity_analysis_key") or st.session_state.get("elasticity_cache_key")
-
-    if not _cache_key_matches_analysis(elasticity_key, analysis_key):
+    analysis_key = (
+        st.session_state.get("sales_signature"),
+        st.session_state.get("nse_signature"),
+        st.session_state.get("promo_signature"),
+    )
+    elasticity_key = st.session_state.get("elasticity_cache_key")
+    if isinstance(elasticity_key, tuple) and elasticity_key[:3] != analysis_key:
         st.warning(
-            "La elasticidad guardada no corresponde a la base actual. Recalcula elasticidad en la vista **2. Elasticidad**."
+            "La elasticidad guardada no corresponde a la base actual de ventas + NSE + promociones. "
+            "Vuelve a calcular elasticidad en la vista **2. Elasticidad**."
         )
         st.session_state.historical_pricing_ready = False
         return False
@@ -875,39 +1109,888 @@ def ensure_historical_pricing_ready() -> bool:
         )
     with col_b:
         st.caption(
-            "Construye la tabla interna pricing_historico_escenarios una sola vez por base. "
-            "Cambiar filtros no recalcula toda la app."
+            "Se calcula una sola vez sobre la base histórica y `elasticidades_periodo`; "
+            "los filtros posteriores no recalculan toda la app."
         )
 
     if st.session_state.historical_pricing_ready and not button_clicked:
         return True
+
     if not button_clicked and not st.session_state.historical_pricing_ready:
-        st.info("Presiona **Calcular / actualizar pricing histórico** para ejecutar el backtesting histórico.")
+        st.info("Presiona **Calcular / actualizar pricing histórico** para ejecutar el backtesting.")
         return False
 
     try:
-        historical_key = (analysis_key, "pricing_historico_escenarios_desde_elasticidades_periodo")
-        cache_hp = st.session_state.manual_cache.setdefault("historical_pricing", {})
-        if historical_key in cache_hp:
-            pricing_historico_escenarios = cache_hp[historical_key]
+        pricing_key = (analysis_key, "pricing_historico_escenarios_v1")
+        cache_pr = st.session_state.manual_cache.setdefault("pricing_historico", {})
+        if pricing_key in cache_pr:
+            pricing_historico_escenarios = cache_pr[pricing_key]
         else:
             with st.spinner("Simulando escenarios históricos con ventas reales y elasticidades_periodo..."):
                 pricing_historico_escenarios = simulate_historical_pricing_cached(
                     st.session_state.ventas_nse,
                     elasticidades_periodo,
                 )
-            cache_hp.clear()
-            cache_hp[historical_key] = pricing_historico_escenarios
+            cache_pr.clear()
+            cache_pr[pricing_key] = pricing_historico_escenarios
 
-        st.session_state.historical_pricing_cache_key = historical_key
+        st.session_state.pricing_cache_key = pricing_key
         st.session_state.pricing_historico_escenarios = pricing_historico_escenarios
         st.session_state.historical_pricing_ready = True
-        st.success("Pricing histórico calculado correctamente. Es backtesting; no predice demanda futura.")
+        st.session_state.pricing_ready = False
+        st.success("Pricing histórico calculado correctamente como backtesting; no se calculó demanda futura.")
         return True
     except Exception as exc:
         st.session_state.historical_pricing_ready = False
         st.error(f"No se pudo calcular pricing histórico: {exc}")
         return False
+
+
+
+def ensure_future_pricing_ready() -> bool:
+    """Calcula pricing futuro con demanda_base_futura y elasticidades ya calculadas."""
+    if not st.session_state.processed:
+        return False
+
+    if st.session_state.get("ventas_nse") is None or st.session_state.ventas_nse.empty:
+        st.warning("Primero procesa la base en la vista **1. Carga y diagnóstico de datos**.")
+        return False
+
+    elasticidades_periodo = st.session_state.get("elasticidades_periodo", pd.DataFrame())
+    if (
+        not st.session_state.get("elasticity_ready", False)
+        or elasticidades_periodo is None
+        or elasticidades_periodo.empty
+    ):
+        st.warning(
+            "Primero calcula la elasticidad en la vista **2. Elasticidad**. "
+            "El simulador futuro usa exclusivamente elasticidades ya calculadas."
+        )
+        return False
+
+    analysis_key = (
+        st.session_state.get("sales_signature"),
+        st.session_state.get("nse_signature"),
+        st.session_state.get("promo_signature"),
+    )
+    elasticity_key = st.session_state.get("elasticity_cache_key")
+    if isinstance(elasticity_key, tuple) and elasticity_key[:3] != analysis_key:
+        st.warning(
+            "La elasticidad guardada no corresponde a la base actual de ventas + NSE + promociones. "
+            "Vuelve a calcular elasticidad en la vista **2. Elasticidad**."
+        )
+        st.session_state.future_pricing_ready = False
+        return False
+
+    col_a, col_b = st.columns([1, 2])
+    with col_a:
+        button_clicked = st.button(
+            "Calcular / actualizar pricing futuro",
+            type="primary" if not st.session_state.future_pricing_ready else "secondary",
+            use_container_width=True,
+        )
+    with col_b:
+        st.caption(
+            "Fase 5: primero construye `demanda_base_futura` para horizontes de 1 y 3 meses; "
+            "luego aplica elasticidades existentes a escenarios de -20% a +20%."
+        )
+
+    if st.session_state.future_pricing_ready and not button_clicked:
+        return True
+
+    if not button_clicked and not st.session_state.future_pricing_ready:
+        st.info("Presiona **Calcular / actualizar pricing futuro** para ejecutar la Fase 5.")
+        return False
+
+    try:
+        # La selección de método/horizonte forma parte de la firma del caché para
+        # recomputar solo cuando cambia la configuración (no en cada filtro visual).
+        metodo_sel = st.session_state.get("future_metodo", "Automático recomendado")
+        horizonte_sel = st.session_state.get("future_horizonte_sel", "Ambos")
+        horizontes = ("1 mes", "3 meses") if horizonte_sel == "Ambos" else (horizonte_sel,)
+        pesos_manual = None
+        if metodo_sel == "Manual avanzado":
+            ventanas = tuple(st.session_state.get("future_manual_ventanas") or ())
+            if ventanas:
+                peso = 1.0 / len(ventanas)
+                pesos_manual = tuple((v, peso) for v in ventanas)
+        config_sig = (metodo_sel, horizontes, pesos_manual)
+
+        pricing_key = (analysis_key, config_sig, "pricing_futuro_escenarios_v2")
+        cache_pr = st.session_state.manual_cache.setdefault("pricing_futuro", {})
+        if pricing_key in cache_pr:
+            demanda_base_futura, pricing_futuro_escenarios = cache_pr[pricing_key]
+        else:
+            with st.spinner("Calculando demanda_base_futura y simulando escenarios futuros..."):
+                demanda_base_futura = build_demand_forecast_cached(
+                    st.session_state.ventas_nse,
+                    metodos=(metodo_sel,),
+                    horizontes=horizontes,
+                    pesos_manual=pesos_manual,
+                )
+                pricing_futuro_escenarios = build_future_pricing_cached(
+                    demanda_base_futura,
+                    elasticidades_periodo,
+                    st.session_state.ventas_nse,
+                )
+            cache_pr.clear()
+            cache_pr[pricing_key] = (demanda_base_futura, pricing_futuro_escenarios)
+
+        st.session_state.demanda_base_futura = demanda_base_futura
+        st.session_state.pricing_futuro_escenarios = pricing_futuro_escenarios
+        st.session_state.demand_forecast_ready = True
+        st.session_state.future_pricing_ready = True
+        st.session_state.historical_pricing_ready = False
+        st.session_state.pricing_ready = False
+        st.success("Pricing futuro calculado correctamente usando demanda_base_futura y elasticidades existentes.")
+        return True
+    except Exception as exc:
+        st.session_state.future_pricing_ready = False
+        st.error(f"No se pudo calcular pricing futuro: {exc}")
+        return False
+
+
+DEMANDA_VENTANAS_MANUAL = [
+    ("ultimos_3_meses", "Últimos 3 meses"),
+    ("ultimos_6_meses", "Últimos 6 meses"),
+    ("ultimos_12_meses", "Últimos 12 meses"),
+    ("ultimos_24_meses", "Últimos 24 meses"),
+    ("mismo_mes_historico", "Mismo mes histórico"),
+    ("mismo_trimestre_historico", "Mismo trimestre histórico"),
+]
+
+
+def _ranking_escenarios_futuro(selected: pd.DataFrame) -> pd.DataFrame:
+    """Agrega los escenarios filtrados y los ordena por atractivo (margen, luego ingreso).
+
+    Cuando hay costo, el mejor escenario es el de mayor margen simulado; si no hay
+    costo, se usa el ingreso simulado. Solo considera escenarios viables (unidades
+    > 0, precio efectivo > 0 y, si es promoción, sin riesgo Alto).
+    """
+    if selected is None or selected.empty:
+        return pd.DataFrame()
+
+    viables = selected.copy()
+    viables["unidades_simuladas"] = pd.to_numeric(viables["unidades_simuladas"], errors="coerce")
+    viables["precio_efectivo"] = pd.to_numeric(viables["precio_efectivo"], errors="coerce")
+    viables = viables[viables["unidades_simuladas"].gt(0) & viables["precio_efectivo"].gt(0)]
+    if "riesgo_promocion" in viables.columns and "tipo_escenario" in viables.columns:
+        es_promo = viables["tipo_escenario"].eq("promocional")
+        viables = viables[~(es_promo & viables["riesgo_promocion"].eq("Alto"))]
+    if viables.empty:
+        return pd.DataFrame()
+
+    ranking = (
+        viables.groupby("nombre_escenario", observed=True, sort=False)
+        .agg(
+            unidades_simuladas=("unidades_simuladas", "sum"),
+            ingreso_simulado=("ingreso_simulado", "sum"),
+            margen_simulado=("margen_simulado", "sum"),
+            cambio_precio_pct=("cambio_precio_pct", "mean"),
+        )
+        .reset_index()
+    )
+    hay_margen = ranking["margen_simulado"].notna().any()
+    ranking["_score"] = ranking["margen_simulado"] if hay_margen else ranking["ingreso_simulado"]
+    ranking = ranking.sort_values(
+        ["_score", "ingreso_simulado"], ascending=[False, False], na_position="last"
+    ).reset_index(drop=True)
+    return ranking
+
+
+def _mejor_escenario_futuro(selected: pd.DataFrame) -> tuple[str, str]:
+    """Devuelve (nombre_mejor_escenario, subtítulo) para la tarjeta de indicador."""
+    ranking = _ranking_escenarios_futuro(selected)
+    if ranking.empty:
+        return "Sin escenario viable", "Revisa filtros"
+    fila = ranking.iloc[0]
+    if pd.notna(fila.get("margen_simulado")) and ranking["margen_simulado"].notna().any():
+        sub = f"Margen {format_money(fila['margen_simulado'])}"
+    else:
+        sub = f"Ingreso {format_money(fila['ingreso_simulado'])}"
+    return str(fila["nombre_escenario"]), sub
+
+
+def _render_mejor_escenario_detalle(selected: pd.DataFrame) -> None:
+    """Muestra un resumen del mejor escenario y el ranking completo."""
+    ranking = _ranking_escenarios_futuro(selected)
+    if ranking.empty:
+        st.info("No hay un escenario viable para la selección actual (sin unidades o precios válidos).")
+        return
+
+    mejor = ranking.iloc[0]
+    skus_sel = selected["SKU"].nunique()
+    alcance = "el SKU seleccionado" if skus_sel == 1 else f"los {skus_sel} SKUs filtrados"
+    if pd.notna(mejor.get("margen_simulado")) and ranking["margen_simulado"].notna().any():
+        criterio = f"mayor **margen simulado** ({format_money(mejor['margen_simulado'])})"
+    else:
+        criterio = f"mayor **ingreso simulado** ({format_money(mejor['ingreso_simulado'])})"
+    st.success(
+        f"Para {alcance}, el mejor escenario es **{mejor['nombre_escenario']}** "
+        f"(cambio de precio promedio {mejor['cambio_precio_pct']:+.1f}%), por {criterio}."
+    )
+
+    ranking_display = ranking.drop(columns=["_score"]).rename(
+        columns={
+            "nombre_escenario": "Escenario",
+            "unidades_simuladas": "Unidades simuladas",
+            "ingreso_simulado": "Ingreso simulado",
+            "margen_simulado": "Margen simulado",
+            "cambio_precio_pct": "Cambio precio %",
+        }
+    )
+    st.dataframe(ranking_display, use_container_width=True)
+
+
+def _render_graficas_futuro(selected: pd.DataFrame) -> None:
+    """Gráficas base vs proyectado por escenario: margen, ingreso y unidades.
+
+    En el pricing futuro no existe un valor "real"; la referencia es la base
+    (demanda al precio actual, sin cambio). Cada gráfica compara ese valor base
+    contra el proyectado por cada escenario de precio.
+    """
+    import plotly.express as px
+
+    if selected is None or selected.empty:
+        st.info("No hay datos suficientes para graficar escenarios.")
+        return
+
+    df = selected.copy()
+    for col in ["margen_base", "margen_simulado", "ingreso_base", "ingreso_simulado",
+                "demanda_base", "unidades_simuladas"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    agg = (
+        df.groupby("nombre_escenario", observed=True, sort=False)
+        .agg(
+            margen_base=("margen_base", "sum"),
+            margen_simulado=("margen_simulado", "sum"),
+            ingreso_base=("ingreso_base", "sum"),
+            ingreso_simulado=("ingreso_simulado", "sum"),
+            demanda_base=("demanda_base", "sum"),
+            unidades_simuladas=("unidades_simuladas", "sum"),
+        )
+        .reset_index()
+    )
+    if agg.empty:
+        st.info("No hay datos suficientes para graficar escenarios.")
+        return
+
+    def _grafica_comparativa(base_col: str, proj_col: str, base_lbl: str, proj_lbl: str, titulo: str, eje_y: str):
+        if not (agg[base_col].notna().any() or agg[proj_col].notna().any()):
+            st.info(f"No hay datos para {titulo.lower()}.")
+            return
+        long = agg.melt(
+            id_vars="nombre_escenario",
+            value_vars=[base_col, proj_col],
+            var_name="tipo",
+            value_name="valor",
+        )
+        long["tipo"] = long["tipo"].map({base_col: base_lbl, proj_col: proj_lbl})
+        fig = px.bar(
+            long, x="nombre_escenario", y="valor", color="tipo", barmode="group",
+            category_orders={"tipo": [base_lbl, proj_lbl]}, title=titulo,
+        )
+        fig.update_layout(xaxis_title="Escenario", yaxis_title=eje_y, legend_title="")
+        st.plotly_chart(fig, use_container_width=True)
+
+    g1, g2 = st.columns(2)
+    with g1:
+        _grafica_comparativa(
+            "margen_base", "margen_simulado", "Margen base", "Margen proyectado",
+            "Margen: base vs proyectado por escenario", "Margen",
+        )
+    with g2:
+        _grafica_comparativa(
+            "ingreso_base", "ingreso_simulado", "Ingreso base", "Ingreso proyectado",
+            "Ingreso: base vs proyectado por escenario", "Ingreso",
+        )
+    _grafica_comparativa(
+        "demanda_base", "unidades_simuladas", "Unidades base", "Unidades proyectadas",
+        "Unidades: base vs proyectado por escenario", "Unidades",
+    )
+
+
+def render_future_pricing_controls() -> None:
+    """Controles de horizonte y método de proyección (Vista 4, Fase 8)."""
+    st.subheader("Configuración de proyección de demanda")
+
+    col_h, col_m = st.columns([1, 2])
+    with col_h:
+        st.radio(
+            "Horizonte",
+            ["1 mes", "3 meses", "Ambos"],
+            index=["1 mes", "3 meses", "Ambos"].index(st.session_state.get("future_horizonte_sel", "Ambos")),
+            key="future_horizonte_sel",
+            horizontal=True,
+        )
+    with col_m:
+        from modules.config import DEMANDA_FUTURA_METODOS
+
+        st.selectbox(
+            "Método de proyección",
+            DEMANDA_FUTURA_METODOS,
+            index=DEMANDA_FUTURA_METODOS.index(st.session_state.get("future_metodo", "Automático recomendado")),
+            key="future_metodo",
+        )
+
+    if st.session_state.get("future_metodo") == "Manual avanzado":
+        st.caption("Selecciona las ventanas históricas a combinar (se reparten con peso uniforme):")
+        cols = st.columns(3)
+        seleccionadas: list[str] = []
+        previas = set(st.session_state.get("future_manual_ventanas") or ["ultimos_3_meses", "ultimos_12_meses", "mismo_mes_historico"])
+        for i, (clave, etiqueta) in enumerate(DEMANDA_VENTANAS_MANUAL):
+            with cols[i % 3]:
+                if st.checkbox(etiqueta, value=clave in previas, key=f"manual_ventana_{clave}"):
+                    seleccionadas.append(clave)
+        st.session_state.future_manual_ventanas = seleccionadas
+
+    st.info(
+        "El sistema calculará la demanda base usando las ventanas históricas seleccionadas y "
+        "después aplicará la elasticidad estimada para simular escenarios de precio."
+    )
+
+
+def render_future_pricing_view() -> None:
+    """Vista 4: Future Pricing Simulator (Fase 5)."""
+    st.title("4. Pricing futuro (simulador)")
+    st.caption("Fase 5: escenarios futuros de pricing para horizontes de 1 mes y 3 meses.")
+    st.info(
+        "Este módulo **no recalcula elasticidad**. Usa `demanda_base_futura` y "
+        "`elasticidades_periodo` ya calculadas para simular escenarios simples de cambio de precio."
+    )
+
+    if not require_processed():
+        return
+
+    render_future_pricing_controls()
+
+    if not ensure_future_pricing_ready():
+        return
+
+    sim = st.session_state.pricing_futuro_escenarios
+    demanda = st.session_state.demanda_base_futura
+    if sim is None or sim.empty:
+        st.warning("No hay escenarios futuros. Revisa demanda_base_futura, precios actuales y elasticidades disponibles.")
+        if demanda is not None and not demanda.empty:
+            st.subheader("Tabla interna: demanda_base_futura")
+            st.dataframe(demanda, use_container_width=True)
+        return
+
+    st.subheader("Filtros")
+    f1, f2, f3, f4 = st.columns(4)
+    horizonte = _dependent_selectbox("Horizonte", ["Todos"] + _safe_sorted_options(sim, "horizonte"), "future_pricing_horizonte", "Todos", f1)
+    df_h = _filter_fast(sim, "horizonte", horizonte)
+    metodo = _dependent_selectbox("Método", ["Todos"] + _safe_sorted_options(df_h, "metodo_proyeccion"), "future_pricing_metodo", "Todos", f2)
+    df_m = _filter_fast(df_h, "metodo_proyeccion", metodo)
+    sku = _dependent_selectbox("SKU", ["Todos"] + _safe_sorted_options(df_m, "SKU"), "future_pricing_sku", "Todos", f3)
+    df_s = _filter_fast(df_m, "SKU", sku)
+    escenario = _dependent_selectbox("Escenario", ["Todos"] + _safe_sorted_options(df_s, "nombre_escenario"), "future_pricing_escenario", "Todos", f4)
+    selected = _filter_fast(df_s, "nombre_escenario", escenario)
+
+    if selected.empty:
+        st.warning("No hay resultados para la combinación de filtros seleccionada.")
+        return
+
+    k1, k2, k3, k4, k5 = st.columns(5)
+    with k1:
+        render_kpi_card("Unidades simuladas", format_num(selected["unidades_simuladas"].sum(), 0), "Futuro")
+    with k2:
+        render_kpi_card("Ingreso simulado", format_money(selected["ingreso_simulado"].sum()), "Futuro")
+    with k3:
+        render_kpi_card("Margen simulado", format_money(selected["margen_simulado"].sum()), "Futuro")
+    with k4:
+        pct_reco = (selected["recomendacion"].eq("Recomendar").mean() * 100) if "recomendacion" in selected.columns else 0
+        render_kpi_card("Escenarios recomendados", f"{pct_reco:.1f}%", "Dentro del filtro")
+    with k5:
+        mejor_nombre, mejor_sub = _mejor_escenario_futuro(selected)
+        render_kpi_card("Mejor escenario", mejor_nombre, mejor_sub)
+
+    st.subheader("Mejor escenario según filtros")
+    _render_mejor_escenario_detalle(selected)
+
+    st.subheader("Gráficas de escenarios")
+    _render_graficas_futuro(selected)
+
+    st.subheader("Confianza y riesgo")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.dataframe(selected["confianza_final"].value_counts(dropna=False).rename_axis("confianza_final").reset_index(name="Escenarios"), use_container_width=True)
+    with c2:
+        st.dataframe(selected["riesgo"].value_counts(dropna=False).rename_axis("riesgo").reset_index(name="Escenarios"), use_container_width=True)
+
+    st.subheader("Tabla interna: pricing_futuro_escenarios")
+    table_cols = [
+        "SKU", "categoria", "departamento", "horizonte", "metodo_proyeccion",
+        "tipo_elasticidad_usada", "tipo_escenario", "nombre_escenario", "precio_actual", "precio_lista",
+        "precio_efectivo", "descuento_efectivo", "cambio_precio_pct", "riesgo_promocion", "demanda_base",
+        "unidades_simuladas", "ingreso_base", "ingreso_simulado", "margen_base",
+        "margen_simulado", "variacion_unidades", "variacion_ingreso", "variacion_margen",
+        "elasticidad_usada", "confianza_elasticidad", "confianza_demanda", "confianza_final",
+        "riesgo", "recomendacion", "razon_recomendacion",
+    ]
+    st.dataframe(selected[[col for col in table_cols if col in selected.columns]], use_container_width=True)
+
+    with st.expander("Ver demanda_base_futura usada", expanded=False):
+        st.dataframe(demanda, use_container_width=True)
+
+    st.subheader("Descarga")
+    st.download_button(
+        "Descargar pricing_futuro_escenarios filtrado",
+        data=_df_to_excel_friendly_csv_bytes(selected, sep=","),
+        file_name="pricing_futuro_escenarios.csv",
+        mime="text/csv; charset=utf-8",
+        use_container_width=True,
+    )
+
+def ensure_recommendations_ready() -> bool:
+    """Genera recomendaciones_sku (Fase 7) a partir de pricing_futuro_escenarios."""
+    if not st.session_state.get("future_pricing_ready", False):
+        st.warning(
+            "Primero calcula el **pricing futuro** en la vista **4. Pricing futuro (simulador)**. "
+            "Las recomendaciones se construyen sobre los escenarios futuros simulados."
+        )
+        return False
+
+    sim = st.session_state.get("pricing_futuro_escenarios", pd.DataFrame())
+    if sim is None or sim.empty:
+        st.warning("No hay escenarios futuros disponibles para generar recomendaciones.")
+        return False
+
+    col_a, col_b = st.columns([1, 2])
+    with col_a:
+        button_clicked = st.button(
+            "Calcular / actualizar recomendaciones",
+            type="primary" if not st.session_state.recommendations_ready else "secondary",
+            use_container_width=True,
+        )
+    with col_b:
+        st.caption(
+            "Fase 7: motor híbrido (reglas de negocio + simulación financiera). "
+            "El Random Forest queda como apoyo opcional y nunca decide la recomendación."
+        )
+
+    if st.session_state.recommendations_ready and not button_clicked:
+        return True
+    if not button_clicked and not st.session_state.recommendations_ready:
+        st.info("Presiona **Calcular / actualizar recomendaciones** para ejecutar la Fase 7.")
+        return False
+
+    try:
+        analysis_key = (
+            st.session_state.get("sales_signature"),
+            st.session_state.get("nse_signature"),
+            st.session_state.get("promo_signature"),
+        )
+        reco_key = (analysis_key, "recomendaciones_sku_v1")
+        cache_re = st.session_state.manual_cache.setdefault("recomendaciones", {})
+        if reco_key in cache_re:
+            recomendaciones = cache_re[reco_key]
+        else:
+            with st.spinner("Generando recomendaciones ejecutivas..."):
+                recomendaciones = build_recommendations_cached(
+                    sim,
+                    st.session_state.get("elasticidades_periodo", pd.DataFrame()),
+                    st.session_state.get("demanda_base_futura", pd.DataFrame()),
+                    st.session_state.ventas_nse,
+                )
+            cache_re.clear()
+            cache_re[reco_key] = recomendaciones
+
+        st.session_state.recomendaciones_sku = recomendaciones
+        st.session_state.recommendations_ready = True
+        st.success("Recomendaciones generadas correctamente.")
+        return True
+    except Exception as exc:
+        st.session_state.recommendations_ready = False
+        st.error(f"No se pudieron generar las recomendaciones: {exc}")
+        return False
+
+
+def render_recommendations_view() -> None:
+    """Vista 5: Recomendaciones ejecutivas (Fase 7)."""
+    st.title("5. Recomendaciones ejecutivas")
+    st.caption("Ranking accionable por SKU: qué hacer con el precio y por qué.")
+    st.info(
+        "Cada SKU recibe una **categoría de recomendación** (subir / bajar-promover / mantener / no recomendar) "
+        "y una **estrategia específica**, con su razón en español. Decisión por reglas; ML solo de apoyo."
+    )
+
+    if not require_processed():
+        return
+    if not ensure_recommendations_ready():
+        return
+
+    reco = st.session_state.get("recomendaciones_sku", pd.DataFrame())
+    if reco is None or reco.empty:
+        st.warning("No hay recomendaciones disponibles para la base actual.")
+        return
+
+    st.subheader("Filtros")
+    f1, f2, f3, f4, f5 = st.columns(5)
+    categoria = _dependent_selectbox("Categoría", ["Todos"] + _safe_sorted_options(reco, "categoria"), "reco_categoria", "Todos", f1)
+    df_c = _filter_fast(reco, "categoria", categoria)
+    departamento = _dependent_selectbox("Departamento", ["Todos"] + _safe_sorted_options(df_c, "departamento"), "reco_departamento", "Todos", f2)
+    df_d = _filter_fast(df_c, "departamento", departamento)
+    # El horizonte se muestra explícitamente como 1 mes / 3 meses / Ambos.
+    # "Ambos" equivale a no filtrar por horizonte.
+    horizontes_disponibles = [h for h in ["1 mes", "3 meses"] if h in _safe_sorted_options(df_d, "horizonte")]
+    horizonte = _dependent_selectbox("Horizonte", ["Ambos"] + horizontes_disponibles, "reco_horizonte", "Ambos", f3)
+    df_h = df_d if horizonte == "Ambos" else _filter_fast(df_d, "horizonte", horizonte)
+    cat_reco = _dependent_selectbox("Recomendación", ["Todos"] + _safe_sorted_options(df_h, "categoria_recomendacion"), "reco_cat_reco", "Todos", f4)
+    df_r = _filter_fast(df_h, "categoria_recomendacion", cat_reco)
+    confianza = _dependent_selectbox("Confianza", ["Todos"] + _safe_sorted_options(df_r, "confianza_final"), "reco_confianza", "Todos", f5)
+    selected = _filter_fast(df_r, "confianza_final", confianza)
+
+    if selected.empty:
+        st.warning("No hay datos para esta selección.")
+        return
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        render_kpi_card("SKUs en ranking", format_num(selected["SKU"].nunique(), 0), "Dentro del filtro")
+    with k2:
+        render_kpi_card("Ingreso esperado", format_money(pd.to_numeric(selected["ingreso_esperado"], errors="coerce").sum()), "Futuro")
+    with k3:
+        render_kpi_card("Margen esperado", format_money(pd.to_numeric(selected["margen_esperado"], errors="coerce").sum()), "Futuro")
+    with k4:
+        recomendables = selected["categoria_recomendacion"].ne("No recomendar").mean() * 100
+        render_kpi_card("SKUs con acción", f"{recomendables:.1f}%", "Recomendados")
+
+    st.subheader("Distribución de recomendaciones")
+    st.dataframe(
+        selected["categoria_recomendacion"].value_counts(dropna=False).rename_axis("categoria_recomendacion").reset_index(name="SKUs"),
+        use_container_width=True,
+    )
+
+    st.subheader("Ranking de SKUs")
+    ranking_cols = [
+        "SKU", "categoria", "departamento", "horizonte",
+        "categoria_recomendacion", "estrategia_especifica",
+        "precio_recomendado", "ingreso_esperado", "margen_esperado",
+        "confianza_final", "riesgo", "razon_recomendacion",
+    ]
+    ranking = selected[[c for c in ranking_cols if c in selected.columns]].copy()
+    ranking = ranking.sort_values("ingreso_esperado", ascending=False, na_position="last")
+    st.dataframe(ranking, use_container_width=True)
+    st.caption("La columna `razon_recomendacion` explica en español el porqué de cada recomendación.")
+
+    st.subheader("Descarga")
+    st.download_button(
+        "Descargar recomendaciones_sku filtrado",
+        data=_df_to_excel_friendly_csv_bytes(selected, sep=","),
+        file_name="recomendaciones_sku.csv",
+        mime="text/csv; charset=utf-8",
+        use_container_width=True,
+    )
+
+
+def render_exportables_view() -> None:
+    """Vista 6: Exportables (placeholder de UI; se cablea por completo en Fase 10)."""
+    st.title("6. Exportables")
+    st.caption("Descarga las tablas internas calculadas en formato CSV.")
+    st.info(
+        "Cada botón exporta una tabla ya calculada. Si una tabla aún no se ha generado, "
+        "ve a su vista correspondiente y ejecútala primero."
+    )
+
+    if not require_processed():
+        return
+
+    exportables = [
+        ("diagnostico_calidad.csv", "diagnostico_calidad", "Diagnóstico de calidad"),
+        ("ventas_limpias.csv", "ventas_limpias", "Ventas limpias"),
+        ("elasticidades_periodo.csv", "elasticidades_periodo", "Elasticidades por periodo"),
+        ("pricing_historico_escenarios.csv", "pricing_historico_escenarios", "Pricing histórico (escenarios)"),
+        ("demanda_base_futura.csv", "demanda_base_futura", "Demanda base futura"),
+        ("pricing_futuro_escenarios.csv", "pricing_futuro_escenarios", "Pricing futuro (escenarios)"),
+        ("recomendaciones_sku.csv", "recomendaciones_sku", "Recomendaciones por SKU"),
+    ]
+
+    for file_name, state_key, label in exportables:
+        df = st.session_state.get(state_key, pd.DataFrame())
+        col_a, col_b = st.columns([3, 2])
+        with col_a:
+            disponible = isinstance(df, pd.DataFrame) and not df.empty
+            estado = f"✅ {len(df)} filas" if disponible else "⏳ aún no generada"
+            st.markdown(f"**{label}** — `{file_name}` · {estado}")
+        with col_b:
+            st.download_button(
+                f"Descargar {file_name}",
+                data=_df_to_excel_friendly_csv_bytes(df if isinstance(df, pd.DataFrame) else pd.DataFrame(), sep=","),
+                file_name=file_name,
+                mime="text/csv; charset=utf-8",
+                use_container_width=True,
+                disabled=not (isinstance(df, pd.DataFrame) and not df.empty),
+                key=f"export_{state_key}",
+            )
+
+
+def _ventas_fase_promocion(ventas_nse: pd.DataFrame, ventanas: pd.DataFrame, sku: str) -> pd.DataFrame:
+    """Etiqueta las ventas semanales de un SKU como Antes / Durante / Después de promoción.
+
+    Toma la primera ventana de promoción del SKU y compara una ventana simétrica de
+    semanas antes y después. Devuelve un DataFrame con columnas `semana`, `unidades`,
+    `fase`. Si no hay datos suficientes, devuelve vacío (no crashea).
+    """
+    from modules.utils import parse_transaction_dates
+
+    if ventas_nse is None or ventas_nse.empty or ventanas is None or ventanas.empty:
+        return pd.DataFrame()
+
+    vent_sku = ventanas[ventanas["SKU"].astype(str) == str(sku)].dropna(subset=["fecha_inicio"])
+    if vent_sku.empty:
+        return pd.DataFrame()
+    inicio = pd.to_datetime(vent_sku["fecha_inicio"].min())
+    fin = pd.to_datetime(vent_sku["fecha_fin"].max())
+    if pd.isna(fin) or fin < inicio:
+        fin = inicio
+
+    ventas = ventas_nse.copy()
+    sku_col = "SKU" if "SKU" in ventas.columns else ("prod_nbr" if "prod_nbr" in ventas.columns else None)
+    if sku_col is None or "qty" not in ventas.columns or "tran_date" not in ventas.columns:
+        return pd.DataFrame()
+    ventas = ventas[ventas[sku_col].astype(str) == str(sku)].copy()
+    if ventas.empty:
+        return pd.DataFrame()
+
+    ventas["tran_date"] = parse_transaction_dates(ventas["tran_date"])
+    ventas["qty"] = pd.to_numeric(ventas["qty"], errors="coerce")
+    ventas = ventas.dropna(subset=["tran_date", "qty"])
+    if ventas.empty:
+        return pd.DataFrame()
+
+    duracion = max((fin - inicio).days, 7)
+    margen = pd.Timedelta(days=duracion)
+    desde = inicio - margen
+    hasta = fin + margen
+    ventana = ventas[(ventas["tran_date"] >= desde) & (ventas["tran_date"] <= hasta)].copy()
+    if ventana.empty:
+        return pd.DataFrame()
+
+    def _fase(fecha):
+        if fecha < inicio:
+            return "Antes"
+        if fecha <= fin:
+            return "Durante"
+        return "Después"
+
+    ventana["fase"] = ventana["tran_date"].map(_fase)
+    serie = (
+        ventana.groupby([pd.Grouper(key="tran_date", freq="W"), "fase"], observed=True)["qty"]
+        .sum()
+        .reset_index()
+        .rename(columns={"tran_date": "semana", "qty": "unidades"})
+    )
+    return serie
+
+
+def render_promociones_historico(selected: pd.DataFrame) -> None:
+    """Sección de promociones dentro del pricing histórico (antes/durante/después)."""
+    from modules.promotions import normalizar_ventanas_promocion
+
+    st.subheader("Impacto de promociones en ventas reales")
+
+    promo_df = st.session_state.get("promo_df")
+    ventanas = normalizar_ventanas_promocion(promo_df)
+
+    if promo_df is None or (isinstance(promo_df, pd.DataFrame) and promo_df.empty):
+        st.info(
+            "No se subió una base de promociones. Es **opcional**: cárgala en la barra lateral "
+            "(sección B) para ver el efecto de las promociones en las ventas reales. "
+            "Las promociones detectadas sí se incorporan al cálculo de elasticidad cuando se proveen."
+        )
+        return
+
+    if ventanas.empty:
+        st.warning(
+            "La base de promociones se cargó pero no se reconocieron columnas de SKU/fecha. "
+            "Asegúrate de incluir un identificador de SKU (`prod_nbr`/`SKU`) y una fecha de inicio "
+            "(`fecha_inicio`/`start_date`)."
+        )
+        return
+
+    skus_con_promo = sorted(ventanas["SKU"].astype(str).unique())
+    st.success(
+        f"Base de promociones considerada: {len(ventanas)} ventanas de promoción sobre "
+        f"{len(skus_con_promo)} SKU(s). También se usa al calcular elasticidad."
+    )
+
+    # SKUs presentes en el filtro actual que además tienen promoción.
+    skus_filtro = set(selected["SKU"].astype(str).unique()) if "SKU" in selected.columns else set()
+    opciones = [s for s in skus_con_promo if not skus_filtro or s in skus_filtro] or skus_con_promo
+    sku_promo = st.selectbox(
+        "SKU para ver ventas antes / durante / después de la promoción",
+        opciones,
+        key="hist_promo_sku",
+    )
+
+    serie = _ventas_fase_promocion(st.session_state.get("ventas_nse", pd.DataFrame()), ventanas, sku_promo)
+    if serie.empty:
+        st.info("No hay suficientes ventas alrededor de la promoción de este SKU para graficar.")
+        return
+
+    import plotly.express as px
+
+    orden = {"Antes": 0, "Durante": 1, "Después": 2}
+    serie = serie.sort_values("semana")
+    fig = px.bar(
+        serie, x="semana", y="unidades", color="fase",
+        category_orders={"fase": ["Antes", "Durante", "Después"]},
+        title=f"Ventas semanales del SKU {sku_promo}: antes, durante y después de la promoción",
+    )
+    fig.update_layout(xaxis_title="Semana", yaxis_title="Unidades vendidas", legend_title="Fase")
+    st.plotly_chart(fig, use_container_width=True)
+
+    resumen = (
+        serie.groupby("fase", observed=True)["unidades"]
+        .agg(["sum", "mean"])
+        .reindex(["Antes", "Durante", "Después"])
+        .rename(columns={"sum": "Unidades totales", "mean": "Promedio semanal"})
+        .reset_index()
+        .rename(columns={"fase": "Fase"})
+    )
+    st.dataframe(resumen, use_container_width=True)
+    antes = resumen.loc[resumen["Fase"].eq("Antes"), "Promedio semanal"].fillna(0).sum()
+    durante = resumen.loc[resumen["Fase"].eq("Durante"), "Promedio semanal"].fillna(0).sum()
+    if antes > 0:
+        cambio = (durante - antes) / antes * 100
+        st.caption(f"Durante la promoción, el promedio semanal de unidades cambió {cambio:+.1f}% frente al periodo previo.")
+
+
+def render_historical_pricing_view() -> None:
+    """Vista 3: Historical Pricing Simulator separado de pricing futuro."""
+    st.title("3. Pricing histórico (backtesting)")
+    st.caption("Simulación histórica de escenarios de precio con ventas reales y elasticidades ya calculadas.")
+    st.info(
+        "Este módulo **no predice futuro** y **no calcula demanda base futura**. "
+        "Responde: ¿qué habría pasado en un periodo pasado si hubiera cambiado el precio?"
+    )
+
+    if not require_processed():
+        return
+
+    if not ensure_historical_pricing_ready():
+        return
+
+    sim = st.session_state.get("pricing_historico_escenarios", pd.DataFrame())
+    if sim is None or sim.empty:
+        st.warning("No hay escenarios históricos. Revisa que existan ventas reales, costos y elasticidades_periodo compatibles.")
+        return
+
+    required_cols = [
+        "categoria", "departamento", "periodo_tipo", "periodo", "SKU",
+        "tipo_elasticidad_usada", "nombre_escenario",
+    ]
+    missing = [col for col in required_cols if col not in sim.columns]
+    if missing:
+        st.error("La tabla pricing_historico_escenarios no tiene columnas obligatorias: " + ", ".join(missing))
+        return
+
+    st.subheader("Filtros")
+    st.caption(
+        "Filtros dependientes: categoría → departamento → periodo_tipo → periodo → SKU → "
+        "tipo de elasticidad usada → escenario de precio. Cambiarlos solo filtra `pricing_historico_escenarios`."
+    )
+
+    f1, f2, f3, f4 = st.columns(4)
+    categoria = _dependent_selectbox("Categoría", ["Todas"] + _safe_sorted_options(sim, "categoria"), "hist_pricing_categoria", "Todas", f1)
+    df_cat = _filter_fast(sim, "categoria", categoria)
+
+    departamento = _dependent_selectbox("Departamento", ["Todos"] + _safe_sorted_options(df_cat, "departamento"), "hist_pricing_departamento", "Todos", f2)
+    df_dept = _filter_fast(df_cat, "departamento", departamento)
+
+    periodo_tipo = _dependent_selectbox("periodo_tipo", ["Todos"] + _safe_sorted_options(df_dept, "periodo_tipo"), "hist_pricing_periodo_tipo", "Todos", f3)
+    df_tipo = _filter_fast(df_dept, "periodo_tipo", periodo_tipo)
+
+    periodo = _dependent_selectbox("Periodo", ["Todos"] + _safe_sorted_options(df_tipo, "periodo"), "hist_pricing_periodo", "Todos", f4)
+    df_periodo = _filter_fast(df_tipo, "periodo", periodo)
+
+    f5, f6, f7 = st.columns(3)
+    sku = _dependent_selectbox("SKU", ["Todos"] + _safe_sorted_options(df_periodo, "SKU"), "hist_pricing_sku", "Todos", f5)
+    df_sku = _filter_fast(df_periodo, "SKU", sku)
+
+    tipo_elasticidad = _dependent_selectbox(
+        "Tipo de elasticidad usada",
+        ["Todos"] + _safe_sorted_options(df_sku, "tipo_elasticidad_usada"),
+        "hist_pricing_tipo_elasticidad",
+        "Todos",
+        f6,
+    )
+    df_elasticidad = _filter_fast(df_sku, "tipo_elasticidad_usada", tipo_elasticidad)
+
+    escenario = _dependent_selectbox(
+        "Escenario de precio",
+        ["Todos"] + _safe_sorted_options(df_elasticidad, "nombre_escenario"),
+        "hist_pricing_escenario",
+        "Todos",
+        f7,
+    )
+    selected = _filter_fast(df_elasticidad, "nombre_escenario", escenario)
+
+    if selected.empty:
+        st.warning("No hay resultados para la combinación de filtros seleccionada.")
+        return
+
+    st.subheader("KPIs del backtesting histórico")
+    unidades_reales = selected["unidades_reales"].sum()
+    unidades_sim = selected["unidades_simuladas"].sum()
+    ingreso_real = selected["ingreso_real"].sum()
+    ingreso_sim = selected["ingreso_simulado"].sum()
+    margen_real = selected["margen_real"].sum()
+    margen_sim = selected["margen_simulado"].sum()
+
+    k1, k2, k3 = st.columns(3)
+    with k1:
+        render_kpi_card("Unidades simuladas", format_num(unidades_sim, 0), f"Real: {format_num(unidades_reales, 0)}")
+    with k2:
+        render_kpi_card("Ingreso simulado", format_money(ingreso_sim), f"Real: {format_money(ingreso_real)}")
+    with k3:
+        render_kpi_card("Margen simulado", format_money(margen_sim), f"Real: {format_money(margen_real)}")
+
+    best = selected[selected["mejor_escenario_historico"].fillna(False).astype(bool)]
+    if not best.empty:
+        st.success("Mejores escenarios históricos dentro del filtro: " + ", ".join(best["nombre_escenario"].dropna().astype(str).unique()[:5]))
+
+    import plotly.express as px
+
+    chart = (
+        selected.groupby("nombre_escenario", observed=True, sort=False)
+        .agg(
+            ingreso_real=("ingreso_real", "sum"),
+            ingreso_simulado=("ingreso_simulado", "sum"),
+            margen_real=("margen_real", "sum"),
+            margen_simulado=("margen_simulado", "sum"),
+        )
+        .reset_index()
+    )
+    if not chart.empty:
+        chart_long = chart.melt(id_vars="nombre_escenario", var_name="métrica", value_name="monto")
+        fig = px.bar(chart_long, x="nombre_escenario", y="monto", color="métrica", barmode="group", title="Real vs simulado por escenario histórico")
+        st.plotly_chart(fig, use_container_width=True)
+
+    render_promociones_historico(selected)
+
+    st.subheader("Tabla interna: pricing_historico_escenarios")
+    table_cols = [
+        "SKU", "categoria", "departamento", "periodo_tipo", "periodo",
+        "tipo_elasticidad_usada", "tipo_escenario", "nombre_escenario", "precio_real", "precio_lista",
+        "precio_efectivo", "descuento_efectivo", "cambio_precio_pct", "riesgo_promocion",
+        "unidades_reales", "unidades_simuladas", "ingreso_real", "ingreso_simulado",
+        "margen_real", "margen_simulado", "variacion_unidades", "variacion_ingreso",
+        "variacion_margen", "recomendacion_historica", "confianza", "razon_recomendacion",
+    ]
+    st.dataframe(selected[[col for col in table_cols if col in selected.columns]], use_container_width=True)
+
+    st.subheader("Descarga")
+    st.download_button(
+        "Descargar pricing_historico_escenarios filtrado",
+        data=_df_to_excel_friendly_csv_bytes(selected, sep=","),
+        file_name="pricing_historico_escenarios.csv",
+        mime="text/csv; charset=utf-8",
+        use_container_width=True,
+    )
 
 def require_processed() -> bool:
     """Valida que haya datos procesados."""
@@ -1024,7 +2107,10 @@ def render_quality_view() -> None:
         st.dataframe(calidad_varianza, use_container_width=True)
 
     with st.expander("Diagnóstico de calidad consolidado"):
-        st.dataframe(diagnostico_calidad, use_container_width=True)
+        st.dataframe(
+            prepare_dataframe_for_streamlit(diagnostico_calidad, force_text_columns=["valor"]),
+            use_container_width=True,
+        )
 
     st.subheader("Comportamiento histórico de ventas con Machine Learning")
     st.markdown(
@@ -1100,14 +2186,34 @@ def render_elasticity_view() -> None:
 
     if elasticidades_periodo is None or elasticidades_periodo.empty:
         st.warning("No se generaron resultados en elasticidades_periodo. Revisa fechas, SKUs y variación de precios.")
-        return
+        df_periodo = _empty_elasticity_periodo_frame()
+    else:
+        df_periodo = prepare_elasticity_dataframe_for_display(elasticidades_periodo)
 
-    if "periodo_tipo" not in elasticidades_periodo.columns:
+    if "periodo_tipo" not in df_periodo.columns:
         st.warning("La tabla elasticidades_periodo no tiene la columna obligatoria periodo_tipo. Recalcula elasticidades.")
+        df_periodo = _empty_elasticity_periodo_frame()
+
+    for col in ELASTICITY_EXPECTED_COLUMNS:
+        if col not in df_periodo.columns:
+            df_periodo[col] = np.nan
+
+    df_periodo = prepare_elasticity_dataframe_for_display(df_periodo)
+    if "periodo_tipo" in df_periodo.columns:
+        df_periodo["periodo_tipo"] = df_periodo["periodo_tipo"].astype(str).str.strip()
+        df_periodo = df_periodo[df_periodo["periodo_tipo"] != ""].copy()
+
+    if df_periodo.empty:
+        st.warning("No hay elasticidades_periodo válidas para mostrar o descargar.")
         return
 
-    df_periodo = elasticidades_periodo.copy().replace([np.inf, -np.inf], np.nan)
-    df_periodo["periodo_tipo"] = df_periodo["periodo_tipo"].astype(str)
+    if "elasticidad" not in df_periodo.columns:
+        st.warning("La tabla elasticidades_periodo no tiene la columna elasticidad; se mostrará sin métricas numéricas.")
+        df_periodo["elasticidad"] = np.nan
+    else:
+        df_periodo["elasticidad"] = pd.to_numeric(df_periodo["elasticidad"], errors="coerce").replace([np.inf, -np.inf], np.nan)
+        if df_periodo["elasticidad"].isna().all():
+            st.warning("La columna elasticidad no contiene valores numéricos válidos con los filtros actuales.")
 
     tipo_labels = {
         "Todos": None,
@@ -1119,15 +2225,6 @@ def render_elasticity_view() -> None:
         "Categoría/Departamento": "categoria_departamento",
     }
 
-    filename_by_tipo = {
-        "Todos": "elasticidades_filtradas.csv",
-        "Mensual": "elasticidades_mensual.csv",
-        "Trimestral": "elasticidades_trimestral.csv",
-        "Semestral": "elasticidades_semestral.csv",
-        "Anual": "elasticidades_anual.csv",
-        "Global SKU": "elasticidades_global_sku.csv",
-        "Categoría/Departamento": "elasticidades_categoria_departamento.csv",
-    }
 
     label_by_periodo = {v: k for k, v in tipo_labels.items() if v is not None}
 
@@ -1180,14 +2277,17 @@ def render_elasticity_view() -> None:
         )
     )
 
-    st.dataframe(resumen, use_container_width=True, hide_index=True)
-
-    recomendables = (
-        df_periodo
-        .get("recomendable_elasticidad", pd.Series(False, index=df_periodo.index))
-        .fillna(False)
-        .astype(bool)
+    st.dataframe(
+        prepare_dataframe_for_streamlit(resumen),
+        use_container_width=True,
+        hide_index=True,
     )
+
+    recomendables_raw = df_periodo.get("recomendable_elasticidad", pd.Series(False, index=df_periodo.index))
+    if recomendables_raw.dtype == "object" or str(recomendables_raw.dtype).startswith("string"):
+        recomendables = recomendables_raw.fillna("").astype(str).str.strip().str.lower().isin(["true", "1", "sí", "si", "yes"])
+    else:
+        recomendables = recomendables_raw.fillna(False).astype(bool)
 
     m1, m2, m3, m4, m5 = st.columns(5)
 
@@ -1222,7 +2322,7 @@ def render_elasticity_view() -> None:
             "Tipo de elasticidad",
             list(tipo_labels.keys()),
             index=list(tipo_labels.keys()).index("Trimestral"),
-            key="elasticidad_tipo_label",
+            key="elasticity_tipo_selectbox",
         )
 
     selected_periodo_tipo = tipo_labels[tipo_label]
@@ -1257,7 +2357,7 @@ def render_elasticity_view() -> None:
             dept = st.selectbox(
                 "Departamento",
                 dept_options,
-                key="elasticidad_departamento",
+                key="elasticity_departamento_selectbox",
             )
 
         filtered_dept = filtered_base.copy()
@@ -1280,7 +2380,7 @@ def render_elasticity_view() -> None:
             periodo = st.selectbox(
                 "Periodo",
                 periodo_options,
-                key="elasticidad_periodo",
+                key="elasticity_periodo_selectbox",
             )
 
         filtered_periodo = filtered_dept.copy()
@@ -1304,7 +2404,7 @@ def render_elasticity_view() -> None:
                 "SKU",
                 sku_options,
                 default=sku_options[: min(5, len(sku_options))],
-                key="elasticidad_skus",
+                key="elasticity_sku_multiselect",
             )
 
         filtered = filtered_periodo.copy()
@@ -1381,7 +2481,7 @@ def render_elasticity_view() -> None:
 
         st.subheader("Tabla de elasticidades")
 
-        filtered_display = build_elasticity_download(filtered)
+        filtered_display = prepare_elasticity_dataframe_for_display(build_elasticity_download(filtered))
 
         st.dataframe(
             filtered_display,
@@ -1426,6 +2526,7 @@ def render_elasticity_view() -> None:
                         x="tran_date",
                         y="Demanda",
                         color="Promoción",
+                        markers=True,
                         title="Demanda semanal con/sin promoción",
                     )
                 else:
@@ -1433,13 +2534,37 @@ def render_elasticity_view() -> None:
                         serie,
                         x="tran_date",
                         y="Demanda",
+                        markers=True,
                         title="Demanda semanal",
                     )
+                fig.update_layout(xaxis_title="Semana", yaxis_title="Unidades")
 
                 st.plotly_chart(
                     fig,
                     use_container_width=True,
                 )
+
+        st.subheader("Curva de elasticidad (precio vs demanda estimada)")
+        curva = build_elasticity_curve_data(filtered, max_skus=MAX_SKUS_CURVA_ELASTICIDAD)
+        if curva.empty:
+            st.info(
+                "No hay datos suficientes para la curva de elasticidad con los filtros actuales. "
+                "Se requiere elasticidad, precio promedio y unidades promedio válidos por SKU."
+            )
+        else:
+            fig_curva = px.line(
+                curva,
+                x="Precio",
+                y="Demanda estimada",
+                color="SKU",
+                title="Curva precio-demanda log-log por SKU (Q = Q₀·(P/P₀)^elasticidad)",
+            )
+            fig_curva.update_layout(xaxis_title="Precio", yaxis_title="Demanda estimada")
+            st.plotly_chart(fig_curva, use_container_width=True)
+            st.caption(
+                "Cada curva muestra cómo cambiaría la demanda estimada al variar el precio, "
+                "según la elasticidad calculada del SKU. Pendiente más pronunciada = más elástico."
+            )
 
         st.subheader("Mapa geográfico de México")
 
@@ -1574,11 +2699,18 @@ def render_elasticity_view() -> None:
             geo = add_state_coordinates(
                 geo,
                 estado_col=estado_col,
-            ).dropna(subset=["lat", "lon"])
+            )
+            geo["lat"] = pd.to_numeric(geo.get("lat"), errors="coerce")
+            geo["lon"] = pd.to_numeric(geo.get("lon"), errors="coerce")
+            geo["marker_size"] = pd.to_numeric(geo["Elasticidad absoluta"], errors="coerce")
+            geo["marker_size"] = geo["marker_size"].replace([np.inf, -np.inf], np.nan)
+            geo["marker_size"] = geo["marker_size"].fillna(1).clip(lower=1)
+            geo = geo.dropna(subset=["lat", "lon", "marker_size"])
+            geo = geo[geo["marker_size"] >= 0].copy()
 
             if geo.empty:
                 st.warning(
-                    "No se pudieron homologar los estados a coordenadas de México."
+                    "No hay datos geográficos válidos para mostrar el mapa."
                 )
 
             else:
@@ -1587,7 +2719,7 @@ def render_elasticity_view() -> None:
                     lat="lat",
                     lon="lon",
                     color="Elasticidad absoluta",
-                    size="Elasticidad absoluta",
+                    size="marker_size",
                     hover_name=estado_col,
                     hover_data={
                         "elasticidad": ":.3f",
@@ -1611,185 +2743,19 @@ def render_elasticity_view() -> None:
 
     st.subheader("Descarga")
 
-    all_csv = build_elasticity_download(df_periodo)
-    filtered_csv = build_elasticity_download(filtered)
+    all_csv = prepare_elasticity_dataframe_for_display(build_elasticity_download(df_periodo))
 
     if all_csv.empty:
         st.warning("No hay elasticidades disponibles para descargar.")
-
     else:
-        d1, d2 = st.columns(2)
-
-        with d1:
-            st.download_button(
-                "Descargar todas las elasticidades",
-                data=convert_df_to_csv(all_csv),
-                file_name="elasticidades_periodo.csv",
-                mime="text/csv",
-                key="download_elasticidades_todas",
-            )
-
-        with d2:
-            if filtered_csv.empty:
-                st.warning("No hay elasticidades filtradas disponibles para descargar.")
-
-            else:
-                st.download_button(
-                    "Descargar elasticidades filtradas",
-                    data=convert_df_to_csv(filtered_csv),
-                    file_name=filename_by_tipo[tipo_label],
-                    mime="text/csv",
-                    key="download_elasticidades_filtradas",
-                )
-
-
-
-def render_historical_pricing_view() -> None:
-    """Vista 3: Pricing Histórico separado del pricing prospectivo."""
-    st.title("3. Pricing Histórico")
-    st.caption("Backtesting histórico: ¿qué habría pasado en un periodo pasado si hubiera cambiado el precio?")
-    st.info(
-        "Este módulo **no predice futuro**, **no calcula demanda base futura** y **no reemplaza el Recommendation Engine**. "
-        "Usa ventas reales del periodo histórico seleccionado y elasticidades ya calculadas en `elasticidades_periodo`."
-    )
-
-    if not require_processed():
-        return
-    if not ensure_historical_pricing_ready():
-        return
-
-    df = st.session_state.get("pricing_historico_escenarios", pd.DataFrame())
-    if df is None or df.empty:
-        st.warning("No hay escenarios históricos. Revisa ventas históricas, costos y elasticidades_periodo.")
-        return
-
-    required_cols = [
-        "categoria", "departamento", "periodo_tipo", "periodo", "SKU",
-        "tipo_elasticidad_usada", "nombre_escenario",
-    ]
-    missing = [col for col in required_cols if col not in df.columns]
-    if missing:
-        st.error("pricing_historico_escenarios no tiene columnas requeridas: " + ", ".join(missing))
-        return
-
-    st.subheader("Filtros de backtesting histórico")
-    f1, f2, f3 = st.columns(3)
-    categoria = _dependent_selectbox(
-        "Categoría",
-        ["Todas"] + _safe_sorted_options(df, "categoria"),
-        "hist_pricing_filter_categoria",
-        "Todas",
-        f1,
-    )
-    tmp = _filter_fast(df, "categoria", categoria)
-    departamento = _dependent_selectbox(
-        "Departamento",
-        ["Todos"] + _safe_sorted_options(tmp, "departamento"),
-        "hist_pricing_filter_departamento",
-        "Todos",
-        f2,
-    )
-    tmp = _filter_fast(tmp, "departamento", departamento)
-    periodo_tipo = _dependent_selectbox(
-        "periodo_tipo",
-        ["Todos"] + _safe_sorted_options(tmp, "periodo_tipo"),
-        "hist_pricing_filter_periodo_tipo",
-        "Todos",
-        f3,
-    )
-
-    tmp = _filter_fast(tmp, "periodo_tipo", periodo_tipo)
-    f4, f5, f6 = st.columns(3)
-    periodo = _dependent_selectbox(
-        "Periodo histórico",
-        ["Todos"] + _safe_sorted_options(tmp, "periodo"),
-        "hist_pricing_filter_periodo",
-        "Todos",
-        f4,
-    )
-    tmp = _filter_fast(tmp, "periodo", periodo)
-    sku = _dependent_selectbox(
-        "SKU",
-        ["Todos"] + _safe_sorted_options(tmp, "SKU"),
-        "hist_pricing_filter_sku",
-        "Todos",
-        f5,
-    )
-    tmp = _filter_fast(tmp, "SKU", sku)
-    tipo_elasticidad = _dependent_selectbox(
-        "Tipo de elasticidad usada",
-        ["Todos"] + _safe_sorted_options(tmp, "tipo_elasticidad_usada"),
-        "hist_pricing_filter_tipo_elasticidad",
-        "Todos",
-        f6,
-    )
-
-    tmp = _filter_fast(tmp, "tipo_elasticidad_usada", tipo_elasticidad)
-    escenario = st.selectbox(
-        "Escenario de precio",
-        ["Todos"] + _safe_sorted_options(tmp, "nombre_escenario"),
-        key="hist_pricing_filter_escenario",
-    )
-    selected = _filter_fast(tmp, "nombre_escenario", escenario)
-
-    if selected.empty:
-        st.warning("No hay datos para los filtros seleccionados.")
-        return
-
-    k1, k2, k3, k4 = st.columns(4)
-    render_kpi_card("Filas simuladas", f"{len(selected):,}", "pricing_historico_escenarios", k1)
-    render_kpi_card("Unidades reales", format_num(selected["unidades_reales"].sum(), 0), "Periodo histórico", k2)
-    render_kpi_card("Ingreso simulado", format_money(selected["ingreso_simulado"].sum()), "Escenario filtrado", k3)
-    render_kpi_card("Variación margen", format_money(selected["variacion_margen"].sum()), "vs margen real", k4)
-
-    st.subheader("Resumen por escenario")
-    resumen = (
-        selected.groupby(["nombre_escenario", "tipo_escenario"], as_index=False)
-        .agg(
-            unidades_reales=("unidades_reales", "sum"),
-            unidades_simuladas=("unidades_simuladas", "sum"),
-            ingreso_real=("ingreso_real", "sum"),
-            ingreso_simulado=("ingreso_simulado", "sum"),
-            margen_real=("margen_real", "sum"),
-            margen_simulado=("margen_simulado", "sum"),
-            variacion_unidades=("variacion_unidades", "sum"),
-            variacion_ingreso=("variacion_ingreso", "sum"),
-            variacion_margen=("variacion_margen", "sum"),
+        st.download_button(
+            "Descargar todas las elasticidades",
+            data=_df_to_excel_friendly_csv_bytes(all_csv, sep=","),
+            file_name="elasticidades_periodo.csv",
+            mime="text/csv; charset=utf-8",
+            key="elasticity_download_all_button",
         )
-        .sort_values("variacion_margen", ascending=False, kind="stable")
-    )
-    st.dataframe(resumen, use_container_width=True)
 
-    import plotly.express as px
-
-    fig = px.bar(
-        resumen,
-        x="nombre_escenario",
-        y=["variacion_ingreso", "variacion_margen"],
-        barmode="group",
-        title="Variación histórica simulada vs resultado real",
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    st.subheader("Tabla interna: pricing_historico_escenarios")
-    cols = [
-        "categoria", "departamento", "periodo_tipo", "periodo", "SKU", "tipo_elasticidad_usada",
-        "nombre_escenario", "precio_real", "precio_lista", "precio_efectivo", "descuento_efectivo",
-        "cambio_precio_pct", "unidades_reales", "unidades_simuladas", "ingreso_real",
-        "ingreso_simulado", "margen_real", "margen_simulado", "variacion_unidades",
-        "variacion_ingreso", "variacion_margen", "recomendacion_historica", "confianza",
-        "razon_recomendacion",
-    ]
-    st.dataframe(selected[[c for c in cols if c in selected.columns]], use_container_width=True)
-
-    csv_bytes = _df_to_excel_friendly_csv_bytes(selected, sep=";")
-    st.download_button(
-        "Descargar pricing_historico_escenarios filtrado",
-        data=csv_bytes,
-        file_name="pricing_historico_escenarios.csv",
-        mime="text/csv; charset=utf-8",
-        use_container_width=True,
-    )
 
 def render_pricing_view() -> None:
     """Vista 3: pricing dinámico y proyección.
@@ -2041,9 +3007,9 @@ def render_pricing_view() -> None:
                         {
                             "pricing_todos_los_escenarios.csv": exp_csv,
                         },
-                        sep=";",
+                        sep=",",
                     )
-                    st.session_state.pricing_best_csv_bytes = _df_to_excel_friendly_csv_bytes(best_csv, sep=";")
+                    st.session_state.pricing_best_csv_bytes = _df_to_excel_friendly_csv_bytes(best_csv, sep=",")
                     st.session_state.pricing_download_rows = len(exp_csv)
                     st.session_state.pricing_best_rows = len(best_csv) if best_csv is not None else 0
                     st.session_state.pricing_download_key = download_key
@@ -2110,7 +3076,15 @@ def main() -> None:
         render_historical_pricing_view()
         return
 
-    render_pricing_view()
+    if vista.startswith("4."):
+        render_future_pricing_view()
+        return
+
+    if vista.startswith("5."):
+        render_recommendations_view()
+        return
+
+    render_exportables_view()
 
 
 if __name__ == "__main__":
