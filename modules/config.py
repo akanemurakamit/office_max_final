@@ -204,3 +204,55 @@ STATE_COORDINATES = {
     "yucatan": (20.7099, -89.0943),
     "zacatecas": (22.7709, -102.5832),
 }
+
+# Configuración de Fase 4: Demand Forecast Engine.
+# Los pesos son editables para ajustar la lógica de demanda base futura sin tocar el motor.
+DEMANDA_FUTURA_METODOS = [
+    "Automático recomendado",
+    "Reciente",
+    "Estacional",
+    "Histórico amplio",
+    "Manual avanzado",
+]
+
+DEMANDA_FUTURA_PESOS_DEFAULT = {
+    "1 mes": {
+        "Automático recomendado": {
+            "ultimos_3_meses": 0.50,
+            "ultimos_12_meses": 0.30,
+            "mismo_mes_historico": 0.20,
+        },
+        # Manual avanzado queda separado para poder ser editado desde configuración.
+        "Manual avanzado": {
+            "ultimos_3_meses": 0.50,
+            "ultimos_12_meses": 0.30,
+            "mismo_mes_historico": 0.20,
+        },
+    },
+    "3 meses": {
+        "Automático recomendado": {
+            "ultimos_6_meses": 0.40,
+            "ultimos_24_meses": 0.30,
+            "mismo_trimestre_historico": 0.30,
+        },
+        # Manual avanzado queda separado para poder ser editado desde configuración.
+        "Manual avanzado": {
+            "ultimos_6_meses": 0.40,
+            "ultimos_24_meses": 0.30,
+            "mismo_trimestre_historico": 0.30,
+        },
+    },
+}
+
+# Mínimos de meses observados para considerar usable cada ventana.
+DEMANDA_FUTURA_MIN_MESES_VENTANA = {
+    "ultimos_3_meses": 2,
+    "ultimos_6_meses": 3,
+    "ultimos_12_meses": 6,
+    "ultimos_24_meses": 12,
+    "mismo_mes_historico": 1,
+    "mismo_trimestre_historico": 3,
+}
+
+# Coeficiente de variación a partir del cual la demanda se considera muy volátil.
+DEMANDA_FUTURA_VOLATILIDAD_CV_ALTA = 1.50
