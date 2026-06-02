@@ -1,5 +1,6 @@
 [server]
 maxUploadSize = 1024
+maxMessageSize = 500
 headless = true
 
 [client]
