@@ -64,6 +64,7 @@ PRICING_FUTURO_ESCENARIOS_COLUMNS = [
     "razon_recomendacion",
     "tipo_escenario",
     "nombre_escenario",
+    "mejor_escenario",
 ]
 
 
@@ -420,11 +421,13 @@ def build_pricing_futuro_escenarios(
     sim["cambio_precio_pct"] = sim["cambio_precio_pct"] * 100
     sim["descuento_efectivo"] = sim["descuento_efectivo"] * 100
 
+    sim["mejor_escenario"] = sim["mejor_escenario"].fillna(False).astype(bool)
     out = sim[PRICING_FUTURO_ESCENARIOS_COLUMNS].replace([np.inf, -np.inf], np.nan)
     # Mantiene la tabla libre de NaN/inf en columnas críticas y evita romper SKUs insuficientes.
     numeric_cols = out.select_dtypes(include=[np.number]).columns
     fill_numeric_cols = [col for col in numeric_cols if col not in {"margen_base", "margen_simulado", "variacion_margen"}]
     out[fill_numeric_cols] = out[fill_numeric_cols].fillna(0.0)
-    object_cols = [col for col in out.columns if col not in numeric_cols]
+    # mejor_escenario es booleano y no debe convertirse a texto "Sin dato".
+    object_cols = [col for col in out.columns if col not in numeric_cols and col != "mejor_escenario"]
     out[object_cols] = out[object_cols].fillna("Sin dato")
     return out.sort_values(["horizonte", "metodo_proyeccion", "SKU", "tipo_elasticidad_usada", "cambio_precio_pct"]).reset_index(drop=True)
