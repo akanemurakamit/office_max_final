@@ -172,12 +172,14 @@ def build_demand_forecast_cached(
     metodos: tuple[str, ...] | None = None,
     horizontes: tuple[str, ...] | None = None,
     pesos_manual: tuple[tuple[str, float], ...] | None = None,
+    mes_inicio_proyeccion: str | None = None,
 ) -> pd.DataFrame:
     """Calcula demanda_base_futura sin recalcular elasticidad ni aplicar promociones.
 
     Los parámetros de método/horizonte/ventanas se pasan como tuplas para que el
     caché de Streamlit pueda hashearlos. ``pesos_manual`` permite a la vista 4
     sobreescribir las ventanas del método "Manual avanzado" sin tocar el motor.
+    ``mes_inicio_proyeccion`` ("YYYY-MM") fija el primer mes a proyectar.
     """
     from modules.demand_forecast import build_demanda_base_futura
 
@@ -194,6 +196,7 @@ def build_demand_forecast_cached(
         horizontes=list(horizontes) if horizontes else None,
         metodos=list(metodos) if metodos else None,
         pesos_config=pesos_config,
+        mes_inicio_proyeccion=mes_inicio_proyeccion,
     )
 
 
@@ -597,6 +600,7 @@ def init_state() -> None:
         "future_metodo": "Automático recomendado",
         "future_horizonte_sel": "Ambos",
         "future_manual_ventanas": [],
+        "future_mes_inicio": "Automático (siguiente mes)",
         "ventas_limpias": pd.DataFrame(),
         "ventas_nse": pd.DataFrame(),
         "promo_df": None,
@@ -759,7 +763,10 @@ def render_sidebar() -> str:
                     sales_signature = get_uploaded_file_signature(sales_file)
                     promo_signature = get_uploaded_file_signature(promo_file) if promo_file is not None else "sin_promociones"
                     sales_df = read_uploaded_file(sales_file, usecols=columnas_ventas)
-                    promo_df = read_uploaded_file(promo_file, usecols=columnas_promos) if promo_file is not None else None
+                    # La base de promociones es opcional y pequeña: se lee COMPLETA (sin
+                    # usecols) para no descartar columnas con nombres no estándar que
+                    # luego impedirían reconocer SKU/fecha en la gráfica de promociones.
+                    promo_df = read_uploaded_file(promo_file) if promo_file is not None else None
 
                     nse_df = build_default_nse()
                     fuente_nse = "default"
@@ -1214,9 +1221,11 @@ def ensure_future_pricing_ready() -> bool:
             if ventanas:
                 peso = 1.0 / len(ventanas)
                 pesos_manual = tuple((v, peso) for v in ventanas)
-        config_sig = (metodo_sel, horizontes, pesos_manual)
+        mes_inicio_sel = st.session_state.get("future_mes_inicio", "Automático (siguiente mes)")
+        mes_inicio = None if mes_inicio_sel == "Automático (siguiente mes)" else mes_inicio_sel
+        config_sig = (metodo_sel, horizontes, pesos_manual, mes_inicio)
 
-        pricing_key = (analysis_key, config_sig, "pricing_futuro_escenarios_v2")
+        pricing_key = (analysis_key, config_sig, "pricing_futuro_escenarios_v3")
         cache_pr = st.session_state.manual_cache.setdefault("pricing_futuro", {})
         if pricing_key in cache_pr:
             demanda_base_futura, pricing_futuro_escenarios = cache_pr[pricing_key]
@@ -1227,6 +1236,7 @@ def ensure_future_pricing_ready() -> bool:
                     metodos=(metodo_sel,),
                     horizontes=horizontes,
                     pesos_manual=pesos_manual,
+                    mes_inicio_proyeccion=mes_inicio,
                 )
                 pricing_futuro_escenarios = build_future_pricing_cached(
                     demanda_base_futura,
@@ -1260,86 +1270,105 @@ DEMANDA_VENTANAS_MANUAL = [
 ]
 
 
-def _ranking_escenarios_futuro(selected: pd.DataFrame) -> pd.DataFrame:
-    """Agrega los escenarios filtrados y los ordena por atractivo (margen, luego ingreso).
+def _mejor_escenario_por_sku(selected: pd.DataFrame) -> pd.DataFrame:
+    """Devuelve SIEMPRE un mejor escenario por cada SKU x horizonte.
 
-    Cuando hay costo, el mejor escenario es el de mayor margen simulado; si no hay
-    costo, se usa el ingreso simulado. Solo considera escenarios viables (unidades
-    > 0, precio efectivo > 0 y, si es promoción, sin riesgo Alto).
+    Prioriza el escenario que el motor marcó como óptimo (``mejor_escenario==True``,
+    el que cumple todos los guardrails de confianza/margen). Para los SKUs que no
+    tienen ninguno marcado, elige el "mejor disponible" entre sus escenarios:
+    mayor margen simulado si hay costo, o mayor ingreso simulado si no, de modo que
+    ningún SKU se quede sin recomendación. Añade la columna ``aptitud`` indicando
+    si es "Óptimo (cumple guardrails)" o "Mejor disponible".
     """
     if selected is None or selected.empty:
         return pd.DataFrame()
 
-    viables = selected.copy()
-    viables["unidades_simuladas"] = pd.to_numeric(viables["unidades_simuladas"], errors="coerce")
-    viables["precio_efectivo"] = pd.to_numeric(viables["precio_efectivo"], errors="coerce")
-    viables = viables[viables["unidades_simuladas"].gt(0) & viables["precio_efectivo"].gt(0)]
-    if "riesgo_promocion" in viables.columns and "tipo_escenario" in viables.columns:
-        es_promo = viables["tipo_escenario"].eq("promocional")
-        viables = viables[~(es_promo & viables["riesgo_promocion"].eq("Alto"))]
-    if viables.empty:
+    df = selected.copy()
+    for col in ["margen_simulado", "ingreso_simulado", "unidades_simuladas", "precio_efectivo", "cambio_precio_pct"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "mejor_escenario" in df.columns:
+        df["mejor_escenario"] = df["mejor_escenario"].fillna(False).astype(bool)
+    else:
+        df["mejor_escenario"] = False
+
+    group_cols = [c for c in ["SKU", "horizonte"] if c in df.columns]
+    if not group_cols:
         return pd.DataFrame()
 
-    ranking = (
-        viables.groupby("nombre_escenario", observed=True, sort=False)
-        .agg(
-            unidades_simuladas=("unidades_simuladas", "sum"),
-            ingreso_simulado=("ingreso_simulado", "sum"),
-            margen_simulado=("margen_simulado", "sum"),
-            cambio_precio_pct=("cambio_precio_pct", "mean"),
-        )
-        .reset_index()
-    )
-    hay_margen = ranking["margen_simulado"].notna().any()
-    ranking["_score"] = ranking["margen_simulado"] if hay_margen else ranking["ingreso_simulado"]
-    ranking = ranking.sort_values(
-        ["_score", "ingreso_simulado"], ascending=[False, False], na_position="last"
-    ).reset_index(drop=True)
-    return ranking
+    filas = []
+    for _, grupo in df.groupby(group_cols, observed=True, sort=False):
+        marcados = grupo[grupo["mejor_escenario"]]
+        if not marcados.empty:
+            fila = marcados.iloc[0].copy()
+            fila["aptitud"] = "Óptimo (cumple guardrails)"
+            filas.append(fila)
+            continue
+        # Fallback: mejor disponible aunque no cumpla guardrails.
+        cand = grupo.copy()
+        # Preferimos escenarios con unidades y precio válidos; si no hay, usamos todo.
+        viables = cand[cand.get("unidades_simuladas", pd.Series(dtype=float)).gt(0) & cand.get("precio_efectivo", pd.Series(dtype=float)).gt(0)]
+        base = viables if not viables.empty else cand
+        if base["margen_simulado"].notna().any():
+            base = base.sort_values(["margen_simulado", "ingreso_simulado"], ascending=[False, False], na_position="last")
+        else:
+            base = base.sort_values(["ingreso_simulado"], ascending=[False], na_position="last")
+        fila = base.iloc[0].copy()
+        fila["aptitud"] = "Mejor disponible"
+        filas.append(fila)
 
-
-def _mejor_escenario_futuro(selected: pd.DataFrame) -> tuple[str, str]:
-    """Devuelve (nombre_mejor_escenario, subtítulo) para la tarjeta de indicador."""
-    ranking = _ranking_escenarios_futuro(selected)
-    if ranking.empty:
-        return "Sin escenario viable", "Revisa filtros"
-    fila = ranking.iloc[0]
-    if pd.notna(fila.get("margen_simulado")) and ranking["margen_simulado"].notna().any():
-        sub = f"Margen {format_money(fila['margen_simulado'])}"
-    else:
-        sub = f"Ingreso {format_money(fila['ingreso_simulado'])}"
-    return str(fila["nombre_escenario"]), sub
+    if not filas:
+        return pd.DataFrame()
+    return pd.DataFrame(filas)
 
 
 def _render_mejor_escenario_detalle(selected: pd.DataFrame) -> None:
-    """Muestra un resumen del mejor escenario y el ranking completo."""
-    ranking = _ranking_escenarios_futuro(selected)
-    if ranking.empty:
-        st.info("No hay un escenario viable para la selección actual (sin unidades o precios válidos).")
+    """Muestra el mejor escenario por SKU de forma estática (uno por cada SKU).
+
+    Cada SKU x horizonte recibe siempre una recomendación: el escenario óptimo
+    según los guardrails del motor cuando existe, o el mejor disponible en caso
+    contrario. La columna ``Aptitud`` aclara cuál de los dos es.
+    """
+    if selected is None or selected.empty:
+        st.info("No hay un mejor escenario disponible para la selección actual.")
         return
 
-    mejor = ranking.iloc[0]
-    skus_sel = selected["SKU"].nunique()
-    alcance = "el SKU seleccionado" if skus_sel == 1 else f"los {skus_sel} SKUs filtrados"
-    if pd.notna(mejor.get("margen_simulado")) and ranking["margen_simulado"].notna().any():
-        criterio = f"mayor **margen simulado** ({format_money(mejor['margen_simulado'])})"
-    else:
-        criterio = f"mayor **ingreso simulado** ({format_money(mejor['ingreso_simulado'])})"
-    st.success(
-        f"Para {alcance}, el mejor escenario es **{mejor['nombre_escenario']}** "
-        f"(cambio de precio promedio {mejor['cambio_precio_pct']:+.1f}%), por {criterio}."
-    )
+    mejores = _mejor_escenario_por_sku(selected)
+    if mejores.empty:
+        st.info("No hay escenarios para los SKUs filtrados.")
+        return
 
-    ranking_display = ranking.drop(columns=["_score"]).rename(
+    cols = [
+        "SKU", "horizonte", "nombre_escenario", "aptitud", "cambio_precio_pct",
+        "precio_efectivo", "unidades_simuladas", "ingreso_simulado", "margen_simulado",
+        "confianza_final", "riesgo",
+    ]
+    tabla = mejores[[c for c in cols if c in mejores.columns]].copy()
+    tabla = tabla.sort_values(["horizonte", "SKU"]).rename(
         columns={
-            "nombre_escenario": "Escenario",
+            "SKU": "SKU",
+            "horizonte": "Horizonte",
+            "nombre_escenario": "Mejor escenario",
+            "aptitud": "Aptitud",
+            "cambio_precio_pct": "Cambio precio %",
+            "precio_efectivo": "Precio efectivo",
             "unidades_simuladas": "Unidades simuladas",
             "ingreso_simulado": "Ingreso simulado",
             "margen_simulado": "Margen simulado",
-            "cambio_precio_pct": "Cambio precio %",
+            "confianza_final": "Confianza",
+            "riesgo": "Riesgo",
         }
     )
-    st.dataframe(ranking_display, use_container_width=True)
+    st.caption(
+        "Cada SKU tiene una recomendación de mejor escenario, la más apta según los cálculos. "
+        "'Óptimo' cumple todos los guardrails (confianza y margen); 'Mejor disponible' es la mejor "
+        "opción aunque no cumpla algún guardrail."
+    )
+    st.dataframe(tabla, use_container_width=True, hide_index=True)
+
+    n_total = mejores["SKU"].nunique() if "SKU" in mejores.columns else len(mejores)
+    n_optimo = (mejores["aptitud"] == "Óptimo (cumple guardrails)").sum()
+    st.caption(f"SKUs con recomendación: {n_total}. De ellos, {n_optimo} cumplen todos los guardrails.")
 
 
 def _render_graficas_futuro(selected: pd.DataFrame) -> None:
@@ -1412,6 +1441,19 @@ def _render_graficas_futuro(selected: pd.DataFrame) -> None:
     )
 
 
+def _meses_proyeccion_disponibles(ventas_nse: pd.DataFrame, n: int = 12) -> list[str]:
+    """Devuelve los próximos N meses ("YYYY-MM") a partir del último mes con datos."""
+    if ventas_nse is None or ventas_nse.empty or "tran_date" not in ventas_nse.columns:
+        return []
+    from modules.utils import parse_transaction_dates
+
+    fechas = parse_transaction_dates(ventas_nse["tran_date"]).dropna()
+    if fechas.empty:
+        return []
+    ultimo = fechas.max().to_period("M")
+    return [str(ultimo + i) for i in range(1, n + 1)]
+
+
 def render_future_pricing_controls() -> None:
     """Controles de horizonte y método de proyección (Vista 4, Fase 8)."""
     st.subheader("Configuración de proyección de demanda")
@@ -1445,6 +1487,32 @@ def render_future_pricing_controls() -> None:
                 if st.checkbox(etiqueta, value=clave in previas, key=f"manual_ventana_{clave}"):
                     seleccionadas.append(clave)
         st.session_state.future_manual_ventanas = seleccionadas
+
+    # Selector de mes de inicio: define el primer mes a proyectar. El horizonte
+    # (1 o 3 meses) determina cuántos meses consecutivos se cubren desde ahí.
+    meses_opciones = _meses_proyeccion_disponibles(st.session_state.get("ventas_nse", pd.DataFrame()))
+    if meses_opciones:
+        opciones = ["Automático (siguiente mes)"] + meses_opciones
+        sel = st.session_state.get("future_mes_inicio", "Automático (siguiente mes)")
+        if sel not in opciones:
+            sel = "Automático (siguiente mes)"
+        st.selectbox(
+            "Mes de inicio de la proyección",
+            opciones,
+            index=opciones.index(sel),
+            key="future_mes_inicio",
+            help="Elige desde qué mes proyectar. Con horizonte de 3 meses se cubren 3 meses consecutivos a partir de este.",
+        )
+        horizonte_sel = st.session_state.get("future_horizonte_sel", "Ambos")
+        mes_sel = st.session_state.get("future_mes_inicio", "Automático (siguiente mes)")
+        if mes_sel != "Automático (siguiente mes)":
+            meses_cubiertos = 1 if horizonte_sel == "1 mes" else 3
+            try:
+                p0 = pd.Period(mes_sel, freq="M")
+                rango = [str(p0 + i) for i in range(meses_cubiertos)]
+                st.caption(f"Se proyectarán los meses: {', '.join(rango)}.")
+            except Exception:
+                pass
 
     st.info(
         "El sistema calculará la demanda base usando las ventanas históricas seleccionadas y "
@@ -1493,7 +1561,7 @@ def render_future_pricing_view() -> None:
         st.warning("No hay resultados para la combinación de filtros seleccionada.")
         return
 
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1, k2, k3, k4 = st.columns(4)
     with k1:
         render_kpi_card("Unidades simuladas", format_num(selected["unidades_simuladas"].sum(), 0), "Futuro")
     with k2:
@@ -1503,11 +1571,8 @@ def render_future_pricing_view() -> None:
     with k4:
         pct_reco = (selected["recomendacion"].eq("Recomendar").mean() * 100) if "recomendacion" in selected.columns else 0
         render_kpi_card("Escenarios recomendados", f"{pct_reco:.1f}%", "Dentro del filtro")
-    with k5:
-        mejor_nombre, mejor_sub = _mejor_escenario_futuro(selected)
-        render_kpi_card("Mejor escenario", mejor_nombre, mejor_sub)
 
-    st.subheader("Mejor escenario según filtros")
+    st.subheader("Mejor escenario por SKU")
     _render_mejor_escenario_detalle(selected)
 
     st.subheader("Gráficas de escenarios")
@@ -1751,7 +1816,8 @@ def _ventas_fase_promocion(ventas_nse: pd.DataFrame, ventanas: pd.DataFrame, sku
     sku_col = "SKU" if "SKU" in ventas.columns else ("prod_nbr" if "prod_nbr" in ventas.columns else None)
     if sku_col is None or "qty" not in ventas.columns or "tran_date" not in ventas.columns:
         return pd.DataFrame()
-    ventas = ventas[ventas[sku_col].astype(str) == str(sku)].copy()
+    # Match de SKU robusto (quita espacios para evitar desajustes con promo_df).
+    ventas = ventas[ventas[sku_col].astype(str).str.strip() == str(sku).strip()].copy()
     if ventas.empty:
         return pd.DataFrame()
 
@@ -1761,11 +1827,17 @@ def _ventas_fase_promocion(ventas_nse: pd.DataFrame, ventanas: pd.DataFrame, sku
     if ventas.empty:
         return pd.DataFrame()
 
-    duracion = max((fin - inicio).days, 7)
+    # Ventana mínima de 60 días a cada lado para capturar datos mensuales/semanales
+    # alrededor de la promoción, aunque la promo en sí sea corta.
+    duracion = max((fin - inicio).days, 60)
     margen = pd.Timedelta(days=duracion)
     desde = inicio - margen
     hasta = fin + margen
     ventana = ventas[(ventas["tran_date"] >= desde) & (ventas["tran_date"] <= hasta)].copy()
+    if ventana.empty:
+        # Fallback: si la promo cae fuera del rango de ventas del SKU, usa todas
+        # las ventas del SKU para no dejar la gráfica vacía.
+        ventana = ventas.copy()
     if ventana.empty:
         return pd.DataFrame()
 
@@ -1895,14 +1967,15 @@ def render_historical_pricing_view() -> None:
     )
 
     f1, f2, f3, f4 = st.columns(4)
-    categoria = _dependent_selectbox("Categoría", ["Todas"] + _safe_sorted_options(sim, "categoria"), "hist_pricing_categoria", "Todas", f1)
-    df_cat = _filter_fast(sim, "categoria", categoria)
+    # Cascada: primero Departamento, luego Categoría (subdepartamento).
+    departamento = _dependent_selectbox("Departamento", ["Todos"] + _safe_sorted_options(sim, "departamento"), "hist_pricing_departamento", "Todos", f1)
+    df_dept = _filter_fast(sim, "departamento", departamento)
 
-    departamento = _dependent_selectbox("Departamento", ["Todos"] + _safe_sorted_options(df_cat, "departamento"), "hist_pricing_departamento", "Todos", f2)
-    df_dept = _filter_fast(df_cat, "departamento", departamento)
+    categoria = _dependent_selectbox("Categoría", ["Todas"] + _safe_sorted_options(df_dept, "categoria"), "hist_pricing_categoria", "Todas", f2)
+    df_cat = _filter_fast(df_dept, "categoria", categoria)
 
-    periodo_tipo = _dependent_selectbox("periodo_tipo", ["Todos"] + _safe_sorted_options(df_dept, "periodo_tipo"), "hist_pricing_periodo_tipo", "Todos", f3)
-    df_tipo = _filter_fast(df_dept, "periodo_tipo", periodo_tipo)
+    periodo_tipo = _dependent_selectbox("periodo_tipo", ["Todos"] + _safe_sorted_options(df_cat, "periodo_tipo"), "hist_pricing_periodo_tipo", "Todos", f3)
+    df_tipo = _filter_fast(df_cat, "periodo_tipo", periodo_tipo)
 
     periodo = _dependent_selectbox("Periodo", ["Todos"] + _safe_sorted_options(df_tipo, "periodo"), "hist_pricing_periodo", "Todos", f4)
     df_periodo = _filter_fast(df_tipo, "periodo", periodo)
