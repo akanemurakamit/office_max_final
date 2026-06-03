@@ -265,9 +265,14 @@ def _read_uploaded_file_cached(
     if name.endswith(".csv"):
         # Ruta rápida: intenta engine=pyarrow con columnas existentes.
         # Si falla por encoding/separador, cae al engine C de pandas.
+        # Se prueban varios encodings en orden; UnicodeDecodeError (y cualquier
+        # excepción de decodificación) simplemente pasa al siguiente encoding.
+        # NOTA: UnicodeDecodeError es subclase de ValueError, por lo que se
+        # captura de forma genérica para no re-lanzar antes de agotar encodings.
         last_error = None
         for encoding in ["utf-8", "utf-8-sig", "latin1", "cp1252"]:
             selected_usecols = _select_existing_usecols(file_bytes, encoding, usecols_tuple)
+            # Intento 1: pyarrow (rápido pero solo soporta UTF-8 realmente)
             try:
                 return pd.read_csv(
                     io.BytesIO(file_bytes),
@@ -277,30 +282,51 @@ def _read_uploaded_file_cached(
                 )
             except Exception as exc:
                 last_error = exc
-                try:
+
+            # Intento 2: engine C de pandas (robusto con todos los encodings)
+            try:
+                df = pd.read_csv(
+                    io.BytesIO(file_bytes),
+                    encoding=encoding,
+                    usecols=_usecols_callable(tuple(selected_usecols)) if selected_usecols else None,
+                    dtype=dtype_map if dtype_map else None,
+                    low_memory=False,
+                )
+                # Si parece que el CSV venía separado por ;, reintenta con ;.
+                if df.shape[1] == 1 and ";" in str(df.columns[0]):
                     df = pd.read_csv(
                         io.BytesIO(file_bytes),
                         encoding=encoding,
-                        usecols=_usecols_callable(tuple(selected_usecols)) if selected_usecols else None,
+                        sep=";",
+                        usecols=_usecols_callable(usecols_tuple),
                         dtype=dtype_map if dtype_map else None,
                         low_memory=False,
                     )
-                    # Si parece que el CSV venía separado por ;, reintenta con ;.
-                    if df.shape[1] == 1 and ";" in str(df.columns[0]):
-                        df = pd.read_csv(
-                            io.BytesIO(file_bytes),
-                            encoding=encoding,
-                            sep=";",
-                            usecols=_usecols_callable(usecols_tuple),
-                            dtype=dtype_map if dtype_map else None,
-                            low_memory=False,
-                        )
-                    return df
-                except UnicodeDecodeError as exc2:
-                    last_error = exc2
-                    continue
-                except ValueError as exc2:
-                    raise ValueError(f"No se pudieron seleccionar columnas del CSV. Revisa encabezados. Detalle: {exc2}") from exc2
+                return df
+            except (UnicodeDecodeError, UnicodeError):
+                # Error de encoding: prueba el siguiente
+                last_error = exc
+                continue
+            except ValueError as exc2:
+                # ValueError que NO sea de encoding (e.g. columnas inválidas):
+                # si aún quedan encodings por probar, continúa; de lo contrario lanza.
+                last_error = exc2
+                continue
+
+        # Último recurso: latin1 con errors='replace' para no bloquear la carga
+        try:
+            df = pd.read_csv(
+                io.BytesIO(file_bytes),
+                encoding="latin1",
+                encoding_errors="replace",
+                usecols=_usecols_callable(usecols_tuple),
+                dtype=dtype_map if dtype_map else None,
+                low_memory=False,
+            )
+            return df
+        except Exception as exc:
+            last_error = exc
+
         raise ValueError(f"No se pudo leer el CSV. Último detalle: {last_error}")
 
     if name.endswith((".xlsx", ".xls")):
