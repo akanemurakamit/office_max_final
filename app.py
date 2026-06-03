@@ -103,12 +103,17 @@ def process_quality_cached(
     fuente_nse: str = "default",
     estado_validacion_nse: str = "default_precargada",
     advertencias_nse: list[str] | None = None,
+    geo_catalog_df: pd.DataFrame | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     """
     Limpia ventas, cruza NSE y calcula semáforo de calidad.
 
     Esta función NO calcula elasticidad ni pricing. Así la app responde rápido
     después de cargar ventas y solo calcula la vista activa.
+
+    Si se proporciona geo_catalog_df (catálogo geográfico equivalente a
+    df_inegi_id del notebook), se ejecuta el cruce de dos bases:
+    key → id_municipio (vía catálogo) y luego id_municipio → NSE.
     """
     from modules.quality import build_quality_diagnostics, calculate_quality_diagnosis
 
@@ -119,6 +124,7 @@ def process_quality_cached(
         fuente_nse=fuente_nse,
         estado_validacion_nse=estado_validacion_nse,
         advertencias_nse=advertencias_nse,
+        geo_catalog_df=geo_catalog_df,
     )
     semaforo, calidad_varianza = calculate_quality_diagnosis(ventas_nse, resumen_limpieza, summary)
     diagnostico_calidad = build_quality_diagnostics(
@@ -589,6 +595,8 @@ def init_state() -> None:
         "nse_source": "Base NSE default",
         "nse_validation_status": "default_precargada",
         "nse_warnings": [],
+        "geo_catalog_df": None,
+        "geo_catalog_signature": "sin_catalogo",
         "processed": False,
         "elasticity_ready": False,
         "pricing_ready": False,
@@ -737,6 +745,21 @@ def render_sidebar() -> str:
 
         st.caption(f"Modo NSE seleccionado: {nse_mode}")
 
+        st.divider()
+        st.markdown("**Catálogo geográfico (opcional)**")
+        st.info(
+            "Sube el catálogo geográfico (`df_inegi_id` / `catalogo_ubica_geo`) con columnas "
+            "`key` y `ubica_geo`. Permite el cruce de dos bases: primero se mapea "
+            "`key → id_municipio` con este catálogo y luego `id_municipio → NSE` con la base NSE."
+        )
+        geo_catalog_file = st.file_uploader(
+            "Catálogo geográfico (key → ubica_geo)",
+            type=["csv", "xlsx", "xls", "parquet"],
+            key="geo_catalog_file",
+        )
+        if geo_catalog_file is not None:
+            st.sidebar.success(f"Catálogo geográfico listo: {get_uploaded_file_info(geo_catalog_file)}")
+
     if sales_file is not None:
         st.sidebar.success(f"Ventas listas: {get_uploaded_file_info(sales_file)}")
     if promo_file is not None:
@@ -797,10 +820,20 @@ def render_sidebar() -> str:
                                 for warning in advertencias_nse[:5]:
                                     st.sidebar.warning(warning)
 
+                    # Catálogo geográfico (df_inegi_id): key → ubica_geo/id_municipio.
+                    geo_catalog_df = None
+                    geo_catalog_signature = "sin_catalogo"
+                    if geo_catalog_file is not None:
+                        geo_catalog_df = read_uploaded_file(geo_catalog_file)
+                        geo_catalog_signature = get_uploaded_file_signature(geo_catalog_file)
+                        st.sidebar.success("Catálogo geográfico leído. Se usará para el cruce key → id_municipio.")
+
                 st.session_state.sales_signature = sales_signature
                 st.session_state.promo_signature = promo_signature
                 st.session_state.nse_signature = nse_signature
+                st.session_state.geo_catalog_signature = geo_catalog_signature
                 st.session_state.active_nse_df = nse_df
+                st.session_state.geo_catalog_df = geo_catalog_df
                 st.session_state.nse_source = "Base NSE personalizada" if fuente_nse == "personalizada" else "Base NSE default"
                 st.session_state.nse_validation_status = estado_validacion_nse
                 st.session_state.nse_warnings = advertencias_nse
@@ -811,7 +844,8 @@ def render_sidebar() -> str:
                     fuente_nse=fuente_nse,
                     estado_validacion_nse=estado_validacion_nse,
                     advertencias_nse=advertencias_nse,
-                    cache_key=(sales_signature, nse_signature, estado_validacion_nse),
+                    cache_key=(sales_signature, nse_signature, estado_validacion_nse, geo_catalog_signature),
+                    geo_catalog_df=geo_catalog_df,
                 )
             except Exception as exc:
                 st.session_state.processed = False
@@ -828,6 +862,7 @@ def process_quality_pipeline(
     estado_validacion_nse: str = "default_precargada",
     advertencias_nse: list[str] | None = None,
     cache_key: tuple | None = None,
+    geo_catalog_df: pd.DataFrame | None = None,
 ) -> None:
     """Ejecuta solo limpieza, cruce NSE y semáforo."""
     if sales_df is None or sales_df.empty:
@@ -842,7 +877,7 @@ def process_quality_pipeline(
         return
 
     try:
-        cache_key = cache_key or (st.session_state.get("sales_signature"), st.session_state.get("nse_signature"))
+        cache_key = cache_key or (st.session_state.get("sales_signature"), st.session_state.get("nse_signature"), st.session_state.get("geo_catalog_signature", "sin_catalogo"))
         cache = st.session_state.manual_cache.setdefault("quality", {})
 
         if cache_key in cache:
@@ -855,6 +890,7 @@ def process_quality_pipeline(
                     fuente_nse=fuente_nse,
                     estado_validacion_nse=estado_validacion_nse,
                     advertencias_nse=advertencias_nse,
+                    geo_catalog_df=geo_catalog_df,
                 )
             cache.clear()
             cache[cache_key] = (ventas_nse, resumen_limpieza, summary, semaforo, calidad_varianza, diagnostico_calidad, nse_info)

@@ -580,6 +580,47 @@ def _limpiar_id_municipio(valor):
     return txt
 
 
+def apply_geo_catalog(ventas: pd.DataFrame, geo_catalog_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Paso 1 del cruce de dos bases: key → id_municipio.
+
+    Replica el bloque 2B del notebook original que usaba df_inegi_id /
+    catalogo_ubica_geo para generar la columna id_municipio a partir de
+    la llave de texto 'key' presente en ventas.
+
+    El catálogo debe tener al menos las columnas 'key' y 'ubica_geo'.
+    La columna resultante en ventas se llama 'id_municipio'.
+    Si ventas ya tiene 'id_municipio', se sobreescribe con los valores del catálogo
+    y se conservan los existentes donde el catálogo no aporte dato.
+    """
+    if geo_catalog_df is None or geo_catalog_df.empty:
+        return ventas
+
+    cat = clean_text_columns(normalize_column_names(geo_catalog_df.copy()))
+    cat.columns = cat.columns.astype(str).str.strip()
+
+    if "key" not in cat.columns or "ubica_geo" not in cat.columns:
+        return ventas
+
+    cat["key"] = cat["key"].astype(str).str.strip().str.lower()
+    cat_reducido = cat[["key", "ubica_geo"]].drop_duplicates("key").copy()
+    cat_reducido = cat_reducido.rename(columns={"ubica_geo": "id_municipio_cat"})
+    cat_reducido["id_municipio_cat"] = cat_reducido["id_municipio_cat"].apply(_limpiar_id_municipio)
+
+    if "key" not in ventas.columns:
+        return ventas
+
+    ventas = ventas.copy()
+    ventas["key"] = ventas["key"].astype(str).str.strip().str.lower()
+
+    # Eliminamos columna previa de id_municipio para regenerarla limpia
+    ventas = ventas.drop(columns=["id_municipio"], errors="ignore")
+
+    ventas = ventas.merge(cat_reducido, on="key", how="left")
+    ventas = ventas.rename(columns={"id_municipio_cat": "id_municipio"})
+    return ventas
+
+
 def _default_nse_hardcoded() -> pd.DataFrame:
     """Base NSE default embebida como respaldo si falta el CSV versionado."""
     rows = [
@@ -752,12 +793,22 @@ def merge_sales_with_nse(
     fuente_nse: str = "default",
     estado_validacion_nse: str = "default_precargada",
     advertencias_nse: Optional[list[str]] = None,
+    geo_catalog_df: Optional[pd.DataFrame] = None,
 ) -> tuple[pd.DataFrame, dict]:
     """
     Cruza ventas con NSE de forma flexible.
     Prioriza categoria_est_socio y usa est_socio solo para construirla.
+
+    Si se proporciona geo_catalog_df (catálogo geográfico con columnas 'key' y
+    'ubica_geo', equivalente a df_inegi_id del notebook), se ejecuta primero el
+    paso key → id_municipio antes del cruce NSE, replicando el flujo original de
+    dos bases del bloque 2B.
     """
     ventas = clean_text_columns(normalize_column_names(sales_df))
+
+    # Paso 1 (opcional): key → id_municipio usando el catálogo geográfico.
+    if geo_catalog_df is not None and not geo_catalog_df.empty:
+        ventas = apply_geo_catalog(ventas, geo_catalog_df)
     advertencias_nse = advertencias_nse or []
     info = {
         "nse_usado": False,
