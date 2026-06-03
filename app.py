@@ -1547,14 +1547,16 @@ def render_future_pricing_view() -> None:
         return
 
     st.subheader("Filtros")
-    f1, f2, f3, f4 = st.columns(4)
+    f1, f2, f3, f4, f5 = st.columns(5)
     horizonte = _dependent_selectbox("Horizonte", ["Todos"] + _safe_sorted_options(sim, "horizonte"), "future_pricing_horizonte", "Todos", f1)
     df_h = _filter_fast(sim, "horizonte", horizonte)
     metodo = _dependent_selectbox("Método", ["Todos"] + _safe_sorted_options(df_h, "metodo_proyeccion"), "future_pricing_metodo", "Todos", f2)
     df_m = _filter_fast(df_h, "metodo_proyeccion", metodo)
-    sku = _dependent_selectbox("SKU", ["Todos"] + _safe_sorted_options(df_m, "SKU"), "future_pricing_sku", "Todos", f3)
-    df_s = _filter_fast(df_m, "SKU", sku)
-    escenario = _dependent_selectbox("Escenario", ["Todos"] + _safe_sorted_options(df_s, "nombre_escenario"), "future_pricing_escenario", "Todos", f4)
+    departamento = _dependent_selectbox("Departamento", ["Todos"] + _safe_sorted_options(df_m, "departamento"), "future_pricing_departamento", "Todos", f3)
+    df_d = _filter_fast(df_m, "departamento", departamento)
+    sku = _dependent_selectbox("SKU", ["Todos"] + _safe_sorted_options(df_d, "SKU"), "future_pricing_sku", "Todos", f4)
+    df_s = _filter_fast(df_d, "SKU", sku)
+    escenario = _dependent_selectbox("Escenario", ["Todos"] + _safe_sorted_options(df_s, "nombre_escenario"), "future_pricing_escenario", "Todos", f5)
     selected = _filter_fast(df_s, "nombre_escenario", escenario)
 
     if selected.empty:
