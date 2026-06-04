@@ -153,11 +153,12 @@ def calculate_elasticity_cached(
     return calculate_elasticity(ventas_nse, promo_df)
 
 
+@st.cache_data(show_spinner=False, max_entries=3)
 def simulate_historical_pricing_cached(
     ventas_historicas: pd.DataFrame,
     elasticidades_periodo: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Simula pricing histórico con caché sin calcular demanda futura."""
+    """Simula pricing histórico con caché de Streamlit para evitar recómputo en reruns."""
     from modules.historical_pricing import build_pricing_historico_escenarios
 
     return build_pricing_historico_escenarios(ventas_historicas, elasticidades_periodo)
@@ -2074,7 +2075,12 @@ def render_historical_pricing_view() -> None:
         "margen_real", "margen_simulado", "variacion_unidades", "variacion_ingreso",
         "variacion_margen", "recomendacion_historica", "confianza", "razon_recomendacion",
     ]
-    st.dataframe(selected[[col for col in table_cols if col in selected.columns]], use_container_width=True)
+    display_df = selected[[col for col in table_cols if col in selected.columns]]
+    MAX_DISPLAY_ROWS = 5_000
+    if len(display_df) > MAX_DISPLAY_ROWS:
+        st.caption(f"Mostrando {MAX_DISPLAY_ROWS:,} de {len(display_df):,} filas. Usa los filtros para reducir la selección o descarga el CSV completo.")
+        display_df = display_df.head(MAX_DISPLAY_ROWS)
+    st.dataframe(display_df, use_container_width=True)
 
     st.subheader("Descarga")
     st.download_button(
