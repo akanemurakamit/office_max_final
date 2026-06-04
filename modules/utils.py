@@ -13,7 +13,10 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
-from .config import DEFAULT_NSE_DIR, DEFAULT_NSE_FILENAME, NSE_CATEGORIAS_VALIDAS, STATE_COORDINATES
+from .config import (
+    DEFAULT_NSE_DIR, DEFAULT_NSE_FILENAME, NSE_CATEGORIAS_VALIDAS, STATE_COORDINATES,
+    INEGI_DIR, INEGI_GEO_CATALOG_FILENAME, INEGI_HOGARES_FILENAME,
+)
 
 
 def normalize_text(value) -> str:
@@ -691,23 +694,50 @@ def _default_nse_hardcoded() -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def build_default_nse() -> pd.DataFrame:
     """
-    Carga la base NSE default precargada desde data/default_nse.
+    Carga la base NSE default precargada.
 
-    Si el CSV versionado no existe o no se puede leer, conserva un respaldo
-    embebido para que la app siga funcionando aunque el usuario solo suba ventas.
+    Prioridad:
+    1. data/inegi/hogares_INEGI.csv  — base INEGI de hogares precargada
+    2. data/default_nse/base_nse_default.csv — base simplificada legacy
+    3. Respaldo embebido de 32 municipios (hardcoded)
     """
-    default_path = Path(DEFAULT_NSE_DIR) / DEFAULT_NSE_FILENAME
+    for path in [
+        Path(INEGI_DIR) / INEGI_HOGARES_FILENAME,
+        Path(DEFAULT_NSE_DIR) / DEFAULT_NSE_FILENAME,
+    ]:
+        try:
+            if path.exists():
+                df = pd.read_csv(path, encoding="latin1", low_memory=False)
+                return clean_text_columns(normalize_column_names(df))
+        except Exception:
+            pass
+    return _default_nse_hardcoded()
+
+
+@st.cache_data(show_spinner=False)
+def build_default_geo_catalog() -> pd.DataFrame:
+    """
+    Carga el catálogo geográfico precargado (data/inegi/catalogo_ubica_geo.csv).
+
+    Contiene la relación key → ubica_geo para todos los municipios de México.
+    Es el equivalente de df_inegi_id del flujo original del notebook.
+    Retorna DataFrame vacío si el archivo no existe.
+    """
+    path = Path(INEGI_DIR) / INEGI_GEO_CATALOG_FILENAME
     try:
-        if default_path.exists():
-            df = pd.read_csv(default_path)
+        if path.exists():
+            df = pd.read_csv(path, encoding="latin1", low_memory=False)
             return clean_text_columns(normalize_column_names(df))
     except Exception:
         pass
-    return _default_nse_hardcoded()
+    return pd.DataFrame()
 
 
 def get_default_nse_path() -> str:
     """Ruta relativa de la base NSE default usada por la app."""
+    inegi_path = Path(INEGI_DIR) / INEGI_HOGARES_FILENAME
+    if inegi_path.exists():
+        return str(inegi_path)
     return str(Path(DEFAULT_NSE_DIR) / DEFAULT_NSE_FILENAME)
 
 

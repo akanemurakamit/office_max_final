@@ -28,6 +28,7 @@ from modules.config import (
 )
 from modules.utils import (
     build_default_nse,
+    build_default_geo_catalog,
     clean_sales_data,
     convert_df_to_csv,
     filter_dataframe_dependently,
@@ -591,8 +592,8 @@ def init_state() -> None:
     """Inicializa session_state."""
     defaults = {
         "active_nse_df": build_default_nse(),
-        "nse_mode": "Usar base NSE default",
-        "nse_source": "Base NSE default",
+        "nse_mode": "Usar base INEGI hogares (default)",
+        "nse_source": "Base INEGI hogares (default)",
         "nse_validation_status": "default_precargada",
         "nse_warnings": [],
         "geo_catalog_df": None,
@@ -707,23 +708,25 @@ def render_sidebar() -> str:
 
     with st.sidebar.expander("C. Configuración de nivel socioeconómico", expanded=False):
         st.info(
-            "La opción predeterminada usa la base NSE default precargada. "
-            "Si subes una base personalizada, se validará al procesar ventas; si falla, se usará default como fallback."
+            "Por defecto se usa la base **INEGI hogares** precargada para asignar el nivel "
+            "socioeconómico. El catálogo geográfico (`catalogo_ubica_geo`) se carga "
+            "automáticamente — no requiere acción. Si lo necesitas, puedes sustituir la "
+            "base de hogares por una propia."
         )
 
         default_nse = build_default_nse()
-        st.caption(f"Base default: `{get_default_nse_path()}`")
+        st.caption(f"Base NSE activa: `{get_default_nse_path()}`")
         st.download_button(
-            "Descargar base NSE default",
+            "Descargar base INEGI hogares",
             data=convert_df_to_csv(default_nse),
-            file_name="base_nse_default.csv",
+            file_name="hogares_INEGI.csv",
             mime="text/csv",
         )
 
         nse_mode = st.radio(
-            "Configuración de nivel socioeconómico",
-            ["Usar base NSE default", "Subir base NSE personalizada"],
-            index=0 if st.session_state.get("nse_mode", "Usar base NSE default") == "Usar base NSE default" else 1,
+            "Base de nivel socioeconómico",
+            ["Usar base INEGI hogares (default)", "Subir base NSE personalizada"],
+            index=0 if st.session_state.get("nse_mode", "Usar base INEGI hogares (default)") == "Usar base INEGI hogares (default)" else 1,
             key="nse_mode_selector",
         )
         st.session_state.nse_mode = nse_mode
@@ -738,27 +741,12 @@ def render_sidebar() -> str:
             st.caption("Se validan columnas NSE, claves de cruce, nulos, duplicados conflictivos, valores válidos y compatibilidad con ventas.")
         else:
             st.session_state.active_nse_df = default_nse
-            st.session_state.nse_signature = "default_nse"
-            st.session_state.nse_source = "Base NSE default"
+            st.session_state.nse_signature = "inegi_hogares_default"
+            st.session_state.nse_source = "Base INEGI hogares (default)"
             st.session_state.nse_validation_status = "default_precargada"
             st.session_state.nse_warnings = []
 
         st.caption(f"Modo NSE seleccionado: {nse_mode}")
-
-        st.divider()
-        st.markdown("**Catálogo geográfico (opcional)**")
-        st.info(
-            "Sube el catálogo geográfico (`df_inegi_id` / `catalogo_ubica_geo`) con columnas "
-            "`key` y `ubica_geo`. Permite el cruce de dos bases: primero se mapea "
-            "`key → id_municipio` con este catálogo y luego `id_municipio → NSE` con la base NSE."
-        )
-        geo_catalog_file = st.file_uploader(
-            "Catálogo geográfico (key → ubica_geo)",
-            type=["csv", "xlsx", "xls", "parquet"],
-            key="geo_catalog_file",
-        )
-        if geo_catalog_file is not None:
-            st.sidebar.success(f"Catálogo geográfico listo: {get_uploaded_file_info(geo_catalog_file)}")
 
     if sales_file is not None:
         st.sidebar.success(f"Ventas listas: {get_uploaded_file_info(sales_file)}")
@@ -795,11 +783,11 @@ def render_sidebar() -> str:
                     fuente_nse = "default"
                     estado_validacion_nse = "default_precargada"
                     advertencias_nse: list[str] = []
-                    nse_signature = "default_nse"
+                    nse_signature = "inegi_hogares_default"
 
                     if st.session_state.get("nse_mode") == "Subir base NSE personalizada":
                         if nse_file is None:
-                            advertencias_nse = ["Se seleccionó NSE personalizada, pero no se subió archivo. Se usa NSE default como fallback."]
+                            advertencias_nse = ["Se seleccionó NSE personalizada, pero no se subió archivo. Se usa base INEGI hogares como fallback."]
                             estado_validacion_nse = "usada_default_por_fallback"
                             st.sidebar.warning(advertencias_nse[0])
                         else:
@@ -815,18 +803,14 @@ def render_sidebar() -> str:
                             else:
                                 fuente_nse = "default"
                                 estado_validacion_nse = "usada_default_por_fallback"
-                                nse_signature = f"default_fallback_{custom_signature}"
-                                st.sidebar.warning("La NSE personalizada no es válida; se usará la base default como fallback.")
+                                nse_signature = f"inegi_hogares_fallback_{custom_signature}"
+                                st.sidebar.warning("La NSE personalizada no es válida; se usará la base INEGI hogares como fallback.")
                                 for warning in advertencias_nse[:5]:
                                     st.sidebar.warning(warning)
 
-                    # Catálogo geográfico (df_inegi_id): key → ubica_geo/id_municipio.
-                    geo_catalog_df = None
-                    geo_catalog_signature = "sin_catalogo"
-                    if geo_catalog_file is not None:
-                        geo_catalog_df = read_uploaded_file(geo_catalog_file)
-                        geo_catalog_signature = get_uploaded_file_signature(geo_catalog_file)
-                        st.sidebar.success("Catálogo geográfico leído. Se usará para el cruce key → id_municipio.")
+                    # Catálogo geográfico: siempre se carga desde data/inegi/ (precargado).
+                    geo_catalog_df = build_default_geo_catalog()
+                    geo_catalog_signature = "inegi_geo_catalog_default" if not geo_catalog_df.empty else "sin_catalogo"
 
                 st.session_state.sales_signature = sales_signature
                 st.session_state.promo_signature = promo_signature

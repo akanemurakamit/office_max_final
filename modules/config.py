@@ -62,6 +62,11 @@ PERMITIR_PARQUET = True
 DEFAULT_NSE_DIR = "data/default_nse"
 DEFAULT_NSE_FILENAME = "base_nse_default.csv"
 
+# Bases INEGI precargadas (catálogo geográfico + NSE por hogar).
+INEGI_DIR = "data/inegi"
+INEGI_GEO_CATALOG_FILENAME = "catalogo_ubica_geo.csv"
+INEGI_HOGARES_FILENAME = "hogares_INEGI.csv"
+
 # Valores NSE canónicos que acepta el motor de configuración.
 NSE_CATEGORIAS_VALIDAS = ["bajo", "medio bajo", "medio alto", "alto"]
 
