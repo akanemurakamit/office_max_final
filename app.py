@@ -279,53 +279,54 @@ hr { border-color: var(--gray-dark) !important; }
 }
 
 /* ── Sidebar nav radio (vista selector) ────────────────────────── */
-/* Remove any background highlight on the selected label row */
+/* No background highlight on any row */
 [data-testid="stSidebar"] [data-testid="stRadio"] label,
 [data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
     background-color: transparent !important;
-    color: var(--bone) !important;
 }
-/* Label text: same weight checked vs unchecked — no colour change */
-[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) span,
+/* Unchecked items: gray, normal weight */
 [data-testid="stSidebar"] [data-testid="stRadio"] label span {
-    color: var(--bone) !important;
+    color: var(--gray) !important;
     font-weight: 400 !important;
 }
+/* Active item: yellow bold — matches screenshot */
 [data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) span {
-    font-weight: 600 !important;
+    color: var(--yellow) !important;
+    font-weight: 700 !important;
 }
-/* Only the radio circle dot turns yellow */
+/* Radio circle: yellow fill when checked */
 [data-testid="stSidebar"] [data-baseweb="radio"] input:checked + div {
     background-color: var(--yellow) !important;
     border-color: var(--yellow) !important;
 }
 
-/* ── Info popover button — minimal circular "i" ─────────────────── */
-/* Target the button Streamlit generates for st.popover() */
-[data-testid="stSidebar"] [data-testid="stPopover"] > button,
-[data-testid="stSidebar"] button[data-testid="stPopoverButton"] {
-    background: transparent !important;
-    border: 1px solid var(--gray-dark) !important;
-    border-radius: 50% !important;
+/* ── Sidebar info card (replaces static st.info / popover) ───────── */
+.sidebar-info-card {
+    background: var(--charcoal3);
+    border: 1px solid var(--gray-dark);
+    border-radius: 8px;
+    padding: 10px 12px;
     color: var(--gray) !important;
-    width: 20px !important;
-    height: 20px !important;
-    min-height: unset !important;
-    padding: 0 !important;
-    font-size: 0.72rem !important;
-    font-style: italic !important;
-    font-weight: 700 !important;
-    line-height: 20px !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    box-shadow: none !important;
-    margin-bottom: 6px !important;
+    font-size: 0.80rem;
+    line-height: 1.45;
+    margin-bottom: 10px;
 }
-[data-testid="stSidebar"] [data-testid="stPopover"] > button:hover,
-[data-testid="stSidebar"] button[data-testid="stPopoverButton"]:hover {
+.sidebar-info-card code {
+    background: var(--charcoal2);
+    color: var(--yellow-lt) !important;
+    padding: 1px 4px;
+    border-radius: 3px;
+    font-size: 0.78rem;
+}
+
+/* ── Sidebar file upload label — hide redundant label text ──────── */
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+    background-color: var(--charcoal3) !important;
+    border: 1px dashed var(--gray-dark) !important;
+    border-radius: 8px !important;
+}
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"]:hover {
     border-color: var(--yellow) !important;
-    color: var(--yellow) !important;
 }
 
 /* ── Sidebar success messages: no green background ──────────────── */
@@ -791,6 +792,7 @@ ELASTICITY_EXPECTED_COLUMNS = [
     "SKU",
     "categoria",
     "departamento",
+    "categoria_est_socio",
     "periodo_tipo",
     "periodo",
     "fecha_inicio",
@@ -1025,37 +1027,45 @@ def render_sidebar() -> str:
     st.sidebar.subheader("Archivos")
 
     with st.sidebar.expander("A. Base de ventas obligatoria", expanded=True):
-        with st.popover("i"):
-            st.markdown(
-                "Sube CSV, Excel o Parquet con ventas. Columnas mínimas: "
-                "`tran_date`, `qty`, `net_sale`, `prod_nbr`, `costo2`."
-            )
+        st.markdown(
+            '<div class="sidebar-info-card">'
+            "Sube CSV, Excel o Parquet con ventas. Columnas mínimas: "
+            "<code>tran_date</code>, <code>qty</code>, <code>net_sale</code>, "
+            "<code>prod_nbr</code>, <code>costo2</code>."
+            "</div>",
+            unsafe_allow_html=True,
+        )
         sales_file = st.file_uploader(
             "Base de ventas",
             type=["csv", "xlsx", "xls", "parquet"],
             key="sales_file",
+            label_visibility="collapsed",
         )
 
     with st.sidebar.expander("B. Base de promociones opcional", expanded=False):
-        with st.popover("i"):
-            st.markdown(
-                "Opcional. Si no se carga, la app funciona sin promociones. "
-                "Se lee solo al presionar `Procesar / actualizar datos`."
-            )
+        st.markdown(
+            '<div class="sidebar-info-card">'
+            "Opcional. Si no se carga, la app funciona sin promociones. "
+            "Se lee solo al presionar <em>Procesar / actualizar datos</em>."
+            "</div>",
+            unsafe_allow_html=True,
+        )
         promo_file = st.file_uploader(
             "Base de promociones",
             type=["csv", "xlsx", "xls", "parquet"],
             key="promo_file",
+            label_visibility="collapsed",
         )
 
     with st.sidebar.expander("C. Configuración de nivel socioeconómico", expanded=False):
-        with st.popover("i"):
-            st.markdown(
-                "Por defecto se usa la base **INEGI hogares** precargada para asignar el nivel "
-                "socioeconómico. El catálogo geográfico (`catalogo_ubica_geo`) se carga "
-                "automáticamente — no requiere acción. Si lo necesitas, puedes sustituir la "
-                "base de hogares por una propia."
-            )
+        st.markdown(
+            '<div class="sidebar-info-card">'
+            "Por defecto se usa la base <strong>INEGI hogares</strong> precargada. "
+            "El catálogo geográfico se carga automáticamente. "
+            "Puedes sustituir la base de hogares por una propia."
+            "</div>",
+            unsafe_allow_html=True,
+        )
 
         default_nse = build_default_nse()
         st.caption(f"Base NSE activa: `{get_default_nse_path()}`")
@@ -1092,9 +1102,15 @@ def render_sidebar() -> str:
         st.caption(f"Modo NSE seleccionado: {nse_mode}")
 
     if sales_file is not None:
-        st.sidebar.success(f"Ventas listas: {get_uploaded_file_info(sales_file)}")
+        st.sidebar.markdown(
+            f'<p style="color:#9E9E9E;font-size:0.78rem;margin:2px 0 6px 0;">✓ {get_uploaded_file_info(sales_file)}</p>',
+            unsafe_allow_html=True,
+        )
     if promo_file is not None:
-        st.sidebar.success(f"Promociones listas: {get_uploaded_file_info(promo_file)}")
+        st.sidebar.markdown(
+            f'<p style="color:#9E9E9E;font-size:0.78rem;margin:2px 0 6px 0;">✓ {get_uploaded_file_info(promo_file)}</p>',
+            unsafe_allow_html=True,
+        )
 
     process = st.sidebar.button("Procesar / actualizar datos", type="primary", use_container_width=True)
     if st.sidebar.button("Limpiar caché de esta sesión", use_container_width=True):
@@ -1655,7 +1671,7 @@ def _mejor_escenario_por_sku(selected: pd.DataFrame) -> pd.DataFrame:
     else:
         df["mejor_escenario"] = False
 
-    group_cols = [c for c in ["SKU", "horizonte"] if c in df.columns]
+    group_cols = [c for c in ["SKU", "horizonte", "categoria_est_socio"] if c in df.columns]
     if not group_cols:
         return pd.DataFrame()
 
@@ -1667,10 +1683,18 @@ def _mejor_escenario_por_sku(selected: pd.DataFrame) -> pd.DataFrame:
             fila["aptitud"] = "Óptimo (cumple guardrails)"
             filas.append(fila)
             continue
-        # Fallback: mejor disponible aunque no cumpla guardrails.
+        # Fallback: elegir el mejor escenario entre los que NO son "No recomendar".
+        # Si todos son "No recomendar", se omite el SKU — no se fuerza un escenario.
         cand = grupo.copy()
-        # Preferimos escenarios con unidades y precio válidos; si no hay, usamos todo.
-        viables = cand[cand.get("unidades_simuladas", pd.Series(dtype=float)).gt(0) & cand.get("precio_efectivo", pd.Series(dtype=float)).gt(0)]
+        if "recomendacion" in cand.columns:
+            cand = cand[cand["recomendacion"].astype(str).ne("No recomendar")]
+        if cand.empty:
+            continue  # No hay escenario recomendable — se omite este SKU/horizonte
+        # De los candidatos aceptables, preferir los con unidades y precio válidos.
+        viables = cand[
+            cand.get("unidades_simuladas", pd.Series(dtype=float)).gt(0)
+            & cand.get("precio_efectivo", pd.Series(dtype=float)).gt(0)
+        ]
         base = viables if not viables.empty else cand
         if base["margen_simulado"].notna().any():
             base = base.sort_values(["margen_simulado", "ingreso_simulado"], ascending=[False, False], na_position="last")
@@ -1702,7 +1726,7 @@ def _render_mejor_escenario_detalle(selected: pd.DataFrame) -> None:
         return
 
     cols = [
-        "SKU", "horizonte", "nombre_escenario", "aptitud", "cambio_precio_pct",
+        "SKU", "categoria_est_socio", "horizonte", "nombre_escenario", "aptitud", "cambio_precio_pct",
         "precio_efectivo", "unidades_simuladas", "ingreso_simulado", "margen_simulado",
         "confianza_final", "riesgo",
     ]
@@ -1710,6 +1734,7 @@ def _render_mejor_escenario_detalle(selected: pd.DataFrame) -> None:
     tabla = tabla.sort_values(["horizonte", "SKU"]).rename(
         columns={
             "SKU": "SKU",
+            "categoria_est_socio": "NSE",
             "horizonte": "Horizonte",
             "nombre_escenario": "Mejor escenario",
             "aptitud": "Aptitud",
@@ -1912,7 +1937,7 @@ def render_future_pricing_view() -> None:
         return
 
     st.subheader("Filtros")
-    f1, f2, f3, f4 = st.columns(4)
+    f1, f2, f3, f4, f5 = st.columns(5)
     horizonte = _dependent_selectbox("Horizonte", ["Todos"] + _safe_sorted_options(sim, "horizonte"), "future_pricing_horizonte", "Todos", f1)
     df_h = _filter_fast(sim, "horizonte", horizonte)
     departamento = _dependent_selectbox("Departamento", ["Todos"] + _safe_sorted_options(df_h, "departamento"), "future_pricing_departamento", "Todos", f2)
@@ -1920,7 +1945,9 @@ def render_future_pricing_view() -> None:
     sku = _dependent_selectbox("SKU", ["Todos"] + _safe_sorted_options(df_d, "SKU"), "future_pricing_sku", "Todos", f3)
     df_s = _filter_fast(df_d, "SKU", sku)
     escenario = _dependent_selectbox("Escenario", ["Todos"] + _safe_sorted_options(df_s, "nombre_escenario"), "future_pricing_escenario", "Todos", f4)
-    selected = _filter_fast(df_s, "nombre_escenario", escenario)
+    df_esc = _filter_fast(df_s, "nombre_escenario", escenario)
+    nse = _dependent_selectbox("NSE", ["Todos"] + _safe_sorted_options(df_esc, "categoria_est_socio"), "future_pricing_nse", "Todos", f5)
+    selected = _filter_fast(df_esc, "categoria_est_socio", nse)
 
     if selected.empty:
         st.warning("No hay resultados para la combinación de filtros seleccionada.")
@@ -1952,7 +1979,7 @@ def render_future_pricing_view() -> None:
 
     st.subheader("Tabla interna: pricing_futuro_escenarios")
     table_cols = [
-        "SKU", "categoria", "departamento", "horizonte", "metodo_proyeccion",
+        "SKU", "categoria", "departamento", "categoria_est_socio", "horizonte", "metodo_proyeccion",
         "tipo_elasticidad_usada", "tipo_escenario", "nombre_escenario", "precio_actual", "precio_lista",
         "precio_efectivo", "descuento_efectivo", "cambio_precio_pct", "riesgo_promocion", "demanda_base",
         "unidades_simuladas", "ingreso_base", "ingreso_simulado", "margen_base",
@@ -2058,19 +2085,21 @@ def render_recommendations_view() -> None:
         return
 
     st.subheader("Filtros")
-    f1, f2, f3, f4, f5 = st.columns(5)
+    f1, f2, f3, f4, f5, f6 = st.columns(6)
     categoria = _dependent_selectbox("Categoría", ["Todos"] + _safe_sorted_options(reco, "categoria"), "reco_categoria", "Todos", f1)
     df_c = _filter_fast(reco, "categoria", categoria)
     departamento = _dependent_selectbox("Departamento", ["Todos"] + _safe_sorted_options(df_c, "departamento"), "reco_departamento", "Todos", f2)
     df_d = _filter_fast(df_c, "departamento", departamento)
+    nse = _dependent_selectbox("NSE", ["Todos"] + _safe_sorted_options(df_d, "categoria_est_socio"), "reco_nse", "Todos", f3)
+    df_nse = _filter_fast(df_d, "categoria_est_socio", nse)
     # El horizonte se muestra explícitamente como 1 mes / 3 meses / Ambos.
     # "Ambos" equivale a no filtrar por horizonte.
-    horizontes_disponibles = [h for h in ["1 mes", "3 meses"] if h in _safe_sorted_options(df_d, "horizonte")]
-    horizonte = _dependent_selectbox("Horizonte", ["Ambos"] + horizontes_disponibles, "reco_horizonte", "Ambos", f3)
-    df_h = df_d if horizonte == "Ambos" else _filter_fast(df_d, "horizonte", horizonte)
-    cat_reco = _dependent_selectbox("Recomendación", ["Todos"] + _safe_sorted_options(df_h, "categoria_recomendacion"), "reco_cat_reco", "Todos", f4)
+    horizontes_disponibles = [h for h in ["1 mes", "3 meses"] if h in _safe_sorted_options(df_nse, "horizonte")]
+    horizonte = _dependent_selectbox("Horizonte", ["Ambos"] + horizontes_disponibles, "reco_horizonte", "Ambos", f4)
+    df_h = df_nse if horizonte == "Ambos" else _filter_fast(df_nse, "horizonte", horizonte)
+    cat_reco = _dependent_selectbox("Recomendación", ["Todos"] + _safe_sorted_options(df_h, "categoria_recomendacion"), "reco_cat_reco", "Todos", f5)
     df_r = _filter_fast(df_h, "categoria_recomendacion", cat_reco)
-    confianza = _dependent_selectbox("Confianza", ["Todos"] + _safe_sorted_options(df_r, "confianza_final"), "reco_confianza", "Todos", f5)
+    confianza = _dependent_selectbox("Confianza", ["Todos"] + _safe_sorted_options(df_r, "confianza_final"), "reco_confianza", "Todos", f6)
     selected = _filter_fast(df_r, "confianza_final", confianza)
 
     if selected.empty:
@@ -2096,7 +2125,7 @@ def render_recommendations_view() -> None:
 
     st.subheader("Ranking de SKUs")
     ranking_cols = [
-        "SKU", "categoria", "departamento", "horizonte",
+        "SKU", "categoria", "departamento", "categoria_est_socio", "horizonte",
         "categoria_recomendacion", "estrategia_especifica",
         "precio_recomendado", "ingreso_esperado", "margen_esperado",
         "confianza_final", "riesgo", "razon_recomendacion",
@@ -2329,7 +2358,7 @@ def render_historical_pricing_view() -> None:
 
     st.subheader("Filtros")
     st.caption(
-        "Filtros dependientes: categoría → departamento → periodo_tipo → periodo → SKU → "
+        "Filtros dependientes: categoría → departamento → periodo_tipo → periodo → SKU → NSE → "
         "tipo de elasticidad usada → escenario de precio. Cambiarlos solo filtra `pricing_historico_escenarios`."
     )
 
@@ -2347,25 +2376,28 @@ def render_historical_pricing_view() -> None:
     periodo = _dependent_selectbox("Periodo", ["Todos"] + _safe_sorted_options(df_tipo, "periodo"), "hist_pricing_periodo", "Todos", f4)
     df_periodo = _filter_fast(df_tipo, "periodo", periodo)
 
-    f5, f6, f7 = st.columns(3)
+    f5, f6, f7, f8 = st.columns(4)
     sku = _dependent_selectbox("SKU", ["Todos"] + _safe_sorted_options(df_periodo, "SKU"), "hist_pricing_sku", "Todos", f5)
     df_sku = _filter_fast(df_periodo, "SKU", sku)
 
+    nse = _dependent_selectbox("NSE", ["Todos"] + _safe_sorted_options(df_sku, "categoria_est_socio"), "hist_pricing_nse", "Todos", f6)
+    df_nse = _filter_fast(df_sku, "categoria_est_socio", nse)
+
     tipo_elasticidad = _dependent_selectbox(
         "Tipo de elasticidad usada",
-        ["Todos"] + _safe_sorted_options(df_sku, "tipo_elasticidad_usada"),
+        ["Todos"] + _safe_sorted_options(df_nse, "tipo_elasticidad_usada"),
         "hist_pricing_tipo_elasticidad",
         "Todos",
-        f6,
+        f7,
     )
-    df_elasticidad = _filter_fast(df_sku, "tipo_elasticidad_usada", tipo_elasticidad)
+    df_elasticidad = _filter_fast(df_nse, "tipo_elasticidad_usada", tipo_elasticidad)
 
     escenario = _dependent_selectbox(
         "Escenario de precio",
         ["Todos"] + _safe_sorted_options(df_elasticidad, "nombre_escenario"),
         "hist_pricing_escenario",
         "Todos",
-        f7,
+        f8,
     )
     selected = _filter_fast(df_elasticidad, "nombre_escenario", escenario)
 
@@ -2406,17 +2438,32 @@ def render_historical_pricing_view() -> None:
         .reset_index()
     )
     if not chart.empty:
-        chart_long = chart.melt(id_vars="nombre_escenario", var_name="métrica", value_name="monto")
-        fig = px.bar(chart_long, x="nombre_escenario", y="monto", color="métrica", barmode="group", title="Real vs simulado por escenario histórico",
-                     color_discrete_sequence=["#FFE566", "#F5C518", "#C49A00", "#FFF0A0"])
-        _theme_chart(fig)
-        st.plotly_chart(fig, use_container_width=True)
+        ch1, ch2 = st.columns(2)
+        with ch1:
+            chart_long = chart.melt(id_vars="nombre_escenario", var_name="métrica", value_name="monto")
+            fig = px.bar(chart_long, x="nombre_escenario", y="monto", color="métrica", barmode="group",
+                         title="Ingreso y margen: real vs simulado",
+                         color_discrete_sequence=["#FFE566", "#F5C518", "#C49A00", "#FFF0A0"])
+            _theme_chart(fig)
+            st.plotly_chart(fig, use_container_width=True)
+        with ch2:
+            chart_u = (
+                selected.groupby("nombre_escenario", observed=True, sort=False)
+                .agg(unidades_reales=("unidades_reales", "sum"), unidades_simuladas=("unidades_simuladas", "sum"))
+                .reset_index()
+            )
+            chart_u_long = chart_u.melt(id_vars="nombre_escenario", var_name="tipo", value_name="unidades")
+            fig_u = px.bar(chart_u_long, x="nombre_escenario", y="unidades", color="tipo", barmode="group",
+                           title="Unidades vendidas vs proyectadas por escenario",
+                           color_discrete_sequence=["#FFE566", "#F5C518"])
+            _theme_chart(fig_u)
+            st.plotly_chart(fig_u, use_container_width=True)
 
     render_promociones_historico(selected)
 
     st.subheader("Tabla interna: pricing_historico_escenarios")
     table_cols = [
-        "SKU", "categoria", "departamento", "periodo_tipo", "periodo",
+        "SKU", "categoria", "departamento", "categoria_est_socio", "periodo_tipo", "periodo",
         "tipo_elasticidad_usada", "tipo_escenario", "nombre_escenario", "precio_real", "precio_lista",
         "precio_efectivo", "descuento_efectivo", "cambio_precio_pct", "riesgo_promocion",
         "unidades_reales", "unidades_simuladas", "ingreso_real", "ingreso_simulado",
@@ -2925,6 +2972,61 @@ def render_elasticity_view() -> None:
                 confianza_dom,
                 "Moda",
             )
+
+        # ── NSE breakdown ──────────────────────────────────────────────
+        nse_in_filtered = (
+            "categoria_est_socio" in filtered.columns
+            and filtered["categoria_est_socio"].replace("", np.nan).dropna().nunique() > 0
+        )
+        if nse_in_filtered:
+            st.subheader("Elasticidad por nivel socioeconómico (NSE)")
+            nse_summary = (
+                filtered[filtered["categoria_est_socio"].replace("", np.nan).notna()]
+                .groupby("categoria_est_socio", observed=True, sort=False)
+                .agg(
+                    registros=("elasticidad", "size"),
+                    elasticidad_promedio=("elasticidad", "mean"),
+                    r2_promedio=("r2", "mean"),
+                    alta=("confianza_elasticidad", lambda s: (s == "Alta").sum()),
+                    media=("confianza_elasticidad", lambda s: (s == "Media").sum()),
+                    baja=("confianza_elasticidad", lambda s: (s == "Baja").sum()),
+                    no_usable=("confianza_elasticidad", lambda s: (s == "No usable").sum()),
+                )
+                .reset_index()
+                .rename(columns={
+                    "categoria_est_socio": "NSE",
+                    "elasticidad_promedio": "elasticidad promedio",
+                    "r2_promedio": "R² promedio",
+                    "alta": "confianza Alta",
+                    "media": "confianza Media",
+                    "baja": "confianza Baja",
+                    "no_usable": "No usable",
+                })
+            )
+            nse_order = ["bajo", "medio bajo", "medio alto", "alto"]
+            nse_summary["_ord"] = nse_summary["NSE"].str.lower().map(
+                {v: i for i, v in enumerate(nse_order)}
+            ).fillna(99)
+            nse_summary = nse_summary.sort_values("_ord").drop(columns="_ord")
+
+            col_t, col_c = st.columns([1, 1])
+            with col_t:
+                st.dataframe(nse_summary, use_container_width=True, hide_index=True)
+            with col_c:
+                chart_nse = nse_summary[nse_summary["elasticidad promedio"].notna()].copy()
+                if not chart_nse.empty:
+                    fig_nse = px.bar(
+                        chart_nse,
+                        x="NSE",
+                        y="elasticidad promedio",
+                        color="NSE",
+                        title="Elasticidad promedio por segmento NSE",
+                        color_discrete_sequence=_CHART_COLORS,
+                        text_auto=".3f",
+                    )
+                    fig_nse.update_layout(showlegend=False)
+                    _theme_chart(fig_nse)
+                    st.plotly_chart(fig_nse, use_container_width=True)
 
         st.subheader("Tabla de elasticidades")
 

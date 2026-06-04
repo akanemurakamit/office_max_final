@@ -132,10 +132,14 @@ PERIODOS_ELASTICIDAD = [
     "categoria_departamento",
 ]
 
+# Columna de nivel socioeconómico usada para estratificar la elasticidad.
+NSE_COL = "categoria_est_socio"
+
 ELASTICIDADES_PERIODO_COLUMNS = [
     "SKU",
     "categoria",
     "departamento",
+    "categoria_est_socio",   # Segmento NSE — NaN cuando no hay datos suficientes por segmento
     "periodo_tipo",
     "periodo",
     "fecha_inicio",
@@ -800,6 +804,72 @@ def _attach_fast_modes(base: pd.DataFrame, ventas: pd.DataFrame, group_cols: lis
     return out
 
 
+def _apply_nse_fallback_vectorized(
+    base_nse: pd.DataFrame,
+    base_sku: pd.DataFrame,
+) -> pd.DataFrame:
+    """
+    Fallback NSE → SKU completo (vectorizado).
+
+    Para cada fila de base_nse cuya elasticidad no es estimable (NaN), busca
+    la elasticidad del mismo SKU × periodo en base_sku (que agrega todos los
+    segmentos NSE). Si existe un valor usable, lo copia y marca el motivo.
+    Filas que tampoco tienen fallback en base_sku quedan con NaN y seguirán
+    al fallback por categoría/departamento que se aplica después.
+    """
+    base = base_nse.copy()
+    # Evaluate the confidence of each NSE-segment row using the same criteria as the
+    # main pipeline. Only fall back when the segment estimate is NOT recomendable.
+    eval_tmp = pd.DataFrame({
+        "SKU": base.get("prod_nbr", pd.RangeIndex(len(base))),
+        "elasticidad": pd.to_numeric(base.get("Elasticidad"), errors="coerce"),
+        "r2": pd.to_numeric(base.get("R2"), errors="coerce"),
+        "p_value": pd.to_numeric(base.get("P_Value"), errors="coerce"),
+        "num_observaciones": pd.to_numeric(base.get("num_observaciones"), errors="coerce").fillna(0),
+        "num_precios_distintos": pd.to_numeric(base.get("num_precios_distintos"), errors="coerce").fillna(0),
+        "Observaciones_Modelo": pd.to_numeric(base.get("Observaciones_Modelo"), errors="coerce").fillna(0),
+        "Motivo_Modelo": base.get("Motivo_Modelo", pd.Series("", index=base.index)).fillna(""),
+    })
+    eval_tmp = _evaluate_confidence_frame(eval_tmp)
+    needs_fb = ~eval_tmp["recomendable_elasticidad"].fillna(False)
+    if not needs_fb.any() or base_sku.empty:
+        return base
+
+    merge_on = [c for c in ["prod_nbr", "periodo", "fecha_inicio", "fecha_fin"] if c in base_sku.columns]
+    if not merge_on:
+        return base
+
+    fb_cols_src = ["Elasticidad", "R2", "P_Value", "Observaciones_Modelo",
+                   "Precios_Distintos_Modelo", "Fuente_Elasticidad", "Motivo_Modelo"]
+    fb_cols_present = [c for c in fb_cols_src if c in base_sku.columns]
+    fb = base_sku[merge_on + fb_cols_present].copy()
+    fb = fb.rename(columns={c: f"{c}_fb" for c in fb_cols_present})
+
+    left = base.loc[needs_fb, [NSE_COL, *merge_on]].copy()
+    left["_idx"] = left.index
+    candidate = left.merge(fb, on=merge_on, how="left")
+
+    if candidate.empty or "Elasticidad_fb" not in candidate.columns:
+        return base
+
+    usable = candidate["Elasticidad_fb"].notna()
+    if not usable.any():
+        return base
+
+    usable_cands = candidate.loc[usable].drop_duplicates("_idx", keep="first")
+    target_idx = usable_cands["_idx"].astype(int).to_numpy()
+
+    for src_col in fb_cols_src:
+        fb_col = f"{src_col}_fb"
+        if fb_col in usable_cands.columns and src_col in base.columns:
+            base.loc[target_idx, src_col] = usable_cands[fb_col].values
+
+    base.loc[target_idx, "Motivo_Modelo"] = (
+        "Fallback NSE→SKU completo: datos insuficientes en segmento NSE"
+    )
+    return base
+
+
 def _assign_period_columns(df: pd.DataFrame, periodo_tipo: str) -> pd.DataFrame:
     """Agrega columnas de periodo a una copia para cálculos vectorizados."""
     out = df.copy()
@@ -1113,17 +1183,67 @@ def _calculate_elasticity_period_prepared(ventas: pd.DataFrame, periodo_tipo: st
         )
         out["SKU"] = out["departamento"].astype(str) + "|" + out["categoria"].astype(str)
         out["periodo_tipo"] = periodo_tipo
+        out[NSE_COL] = np.nan  # No se estratifica por NSE a nivel categoría/departamento
         out = _evaluate_confidence_frame(out)
         out = out.replace([np.inf, -np.inf], np.nan)
         return out[ELASTICIDADES_PERIODO_COLUMNS]
 
-    base = _period_estimates_fast(ventas, periodo_tipo, ["prod_nbr"], f"SKU-{periodo_tipo}")
-    if base.empty:
+    # ── SKU-level base (siempre se calcula; sirve como fallback NSE) ───────────
+    base_sku = _period_estimates_fast(ventas, periodo_tipo, ["prod_nbr"], f"SKU-{periodo_tipo}")
+    if base_sku.empty:
         return _empty_elasticidades_periodo()
 
-    descriptoras = ["subdept_nm", "dept_nm"]
     period_df = _assign_period_columns(ventas, periodo_tipo)
-    base = _attach_fast_modes(base, period_df, ["prod_nbr", "periodo", "fecha_inicio", "fecha_fin"], descriptoras)
+
+    # ── Intento NSE-estratificado ──────────────────────────────────────────────
+    # Si existe la columna NSE con valores válidos, calcula la elasticidad por
+    # SKU × NSE × periodo. Las filas sin suficientes datos en el segmento NSE
+    # hacen fallback a la elasticidad SKU × periodo (sin estratificación).
+    nse_available = (
+        NSE_COL in ventas.columns
+        and ventas[NSE_COL].notna().any()
+        and ventas[NSE_COL].astype(str).str.strip().ne("").any()
+        and ventas[NSE_COL].astype(str).str.strip().ne("nan").any()
+    )
+
+    if nse_available:
+        ventas_nse_ok = ventas[
+            ventas[NSE_COL].notna()
+            & ventas[NSE_COL].astype(str).str.strip().ne("")
+            & ventas[NSE_COL].astype(str).str.strip().ne("nan")
+            & ventas[NSE_COL].astype(str).str.lower().ne("nse_no_asignado")
+        ].copy()
+
+        base_nse_raw = (
+            _period_estimates_fast(
+                ventas_nse_ok, periodo_tipo,
+                ["prod_nbr", NSE_COL],
+                f"SKU-NSE-{periodo_tipo}",
+            )
+            if not ventas_nse_ok.empty
+            else pd.DataFrame()
+        )
+
+        if not base_nse_raw.empty:
+            # Fallback por segmento: si un segmento NSE no tiene suficientes datos,
+            # sustituye con la elasticidad del SKU completo (todos los NSE juntos).
+            base_nse_raw = _apply_nse_fallback_vectorized(base_nse_raw, base_sku)
+            base = base_nse_raw
+            entity_group_cols = ["prod_nbr", NSE_COL, "periodo", "fecha_inicio", "fecha_fin"]
+        else:
+            # Sin datos NSE válidos para ningún segmento → SKU-nivel
+            base = base_sku
+            entity_group_cols = ["prod_nbr", "periodo", "fecha_inicio", "fecha_fin"]
+    else:
+        base = base_sku
+        entity_group_cols = ["prod_nbr", "periodo", "fecha_inicio", "fecha_fin"]
+
+    # ── Adjuntar descriptores (categoria, departamento) ────────────────────────
+    descriptoras = ["subdept_nm", "dept_nm"]
+    attach_group_cols = [c for c in entity_group_cols if c in base.columns and c in period_df.columns]
+    base = _attach_fast_modes(base, period_df, attach_group_cols, descriptoras)
+
+    # ── Renombrar columnas al esquema canónico ─────────────────────────────────
     base = base.rename(
         columns={
             "prod_nbr": "SKU",
@@ -1134,6 +1254,11 @@ def _calculate_elasticity_period_prepared(ventas: pd.DataFrame, periodo_tipo: st
             "P_Value": "p_value",
         }
     )
+
+    # Asegurar que NSE_COL esté presente (NaN si no hubo estratificación)
+    if NSE_COL not in base.columns:
+        base[NSE_COL] = np.nan
+
     base["periodo_tipo"] = periodo_tipo
     base = _evaluate_confidence_frame(base)
 

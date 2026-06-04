@@ -35,6 +35,7 @@ PRICING_FUTURO_ESCENARIOS_COLUMNS = [
     "SKU",
     "categoria",
     "departamento",
+    "categoria_est_socio",
     "horizonte",
     "metodo_proyeccion",
     "fecha_inicio_proyeccion",
@@ -218,23 +219,32 @@ def _build_elasticity_candidates(demanda: pd.DataFrame, elasticidades_periodo: p
     if demanda.empty or elas.empty:
         return pd.DataFrame()
 
-    keep = ["SKU", "categoria", "departamento", "periodo_tipo", "periodo", "elasticidad", "confianza_elasticidad", "_fecha_fin_ord"]
+    keep = ["SKU", "categoria", "departamento", "categoria_est_socio", "periodo_tipo", "periodo", "elasticidad", "confianza_elasticidad", "_fecha_fin_ord"]
     keep = [col for col in keep if col in elas.columns]
+    nse_in_elas = "categoria_est_socio" in keep
     candidates: list[pd.DataFrame] = []
 
     global_sku = elas[elas.get("periodo_tipo", pd.Series(index=elas.index, dtype=object)).eq("global_sku")][keep].copy()
     if not global_sku.empty:
-        global_sku = global_sku.sort_values(["SKU", "_fecha_fin_ord"], ascending=[True, False], kind="stable").drop_duplicates("SKU")
+        dedup_global = [c for c in ["SKU", "categoria_est_socio"] if c in global_sku.columns]
+        global_sku = global_sku.sort_values(["SKU", "_fecha_fin_ord"], ascending=[True, False], kind="stable").drop_duplicates(dedup_global)
         global_sku = global_sku.drop(columns=[c for c in ["categoria", "departamento", "periodo_tipo", "periodo", "_fecha_fin_ord"] if c in global_sku.columns])
-        merged = demanda.merge(global_sku, on="SKU", how="left")
+        merge_on_global = [c for c in ["SKU", "categoria_est_socio"] if c in global_sku.columns and c in demanda.columns]
+        if not merge_on_global:
+            merge_on_global = ["SKU"]
+        merged = demanda.merge(global_sku, on=merge_on_global, how="left")
         merged["tipo_elasticidad_usada"] = "elasticidad_sku_global"
         candidates.append(merged)
 
     sku_period = elas[elas.get("periodo_tipo", pd.Series(index=elas.index, dtype=object)).isin(["mensual", "trimestral", "semestral", "anual"])][keep].copy()
     if not sku_period.empty:
-        sku_period = sku_period.sort_values(["SKU", "_fecha_fin_ord"], ascending=[True, False], kind="stable").drop_duplicates("SKU")
+        dedup_sku = [c for c in ["SKU", "categoria_est_socio"] if c in sku_period.columns]
+        sku_period = sku_period.sort_values(["SKU", "_fecha_fin_ord"], ascending=[True, False], kind="stable").drop_duplicates(dedup_sku)
         sku_period = sku_period.drop(columns=[c for c in ["categoria", "departamento", "periodo_tipo", "periodo", "_fecha_fin_ord"] if c in sku_period.columns])
-        merged = demanda.merge(sku_period, on="SKU", how="left")
+        merge_on_sku = [c for c in ["SKU", "categoria_est_socio"] if c in sku_period.columns and c in demanda.columns]
+        if not merge_on_sku:
+            merge_on_sku = ["SKU"]
+        merged = demanda.merge(sku_period, on=merge_on_sku, how="left")
         merged["tipo_elasticidad_usada"] = "elasticidad_sku_reciente"
         candidates.append(merged)
 

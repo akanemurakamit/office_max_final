@@ -38,6 +38,7 @@ PRICING_HISTORICO_ESCENARIOS_COLUMNS = [
     "SKU",
     "categoria",
     "departamento",
+    "categoria_est_socio",
     "periodo_tipo",
     "periodo",
     "fecha_inicio",
@@ -267,17 +268,20 @@ def _build_elasticity_candidates(base: pd.DataFrame, elasticidades_periodo: pd.D
         "confianza_elasticidad": "confianza",
         "razon_no_recomendable": "razon_elasticidad",
     }
-    keep = ["SKU", "categoria", "departamento", "periodo_tipo", "periodo", *rename.keys()]
+    keep = ["SKU", "categoria", "departamento", "categoria_est_socio", "periodo_tipo", "periodo", *rename.keys()]
     keep = [col for col in keep if col in elas.columns]
+    nse_in_elas = "categoria_est_socio" in keep
 
     candidates: list[pd.DataFrame] = []
 
     # Elasticidad exacta del SKU en el periodo histórico seleccionado.
     exact = elas[elas["periodo_tipo"].isin(PERIODOS_HISTORICOS)][keep].rename(columns=rename)
     if not exact.empty:
-        exact = exact.drop_duplicates(["SKU", "periodo_tipo", "periodo"])
+        dedup_cols_exact = [c for c in ["SKU", "periodo_tipo", "periodo", "categoria_est_socio"] if c in exact.columns]
+        exact = exact.drop_duplicates(dedup_cols_exact)
+        drop_from_exact = [c for c in ["categoria", "departamento"] if c in exact.columns]
         merged = base.merge(
-            exact.drop(columns=[c for c in ["categoria", "departamento"] if c in exact.columns]),
+            exact.drop(columns=drop_from_exact),
             on=["SKU", "periodo_tipo", "periodo"],
             how="left",
         )
@@ -287,9 +291,14 @@ def _build_elasticity_candidates(base: pd.DataFrame, elasticidades_periodo: pd.D
     # Elasticidad global del SKU, replicada sobre cada periodo histórico real.
     global_sku = elas[elas["periodo_tipo"].eq("global_sku")][keep].rename(columns=rename)
     if not global_sku.empty:
-        global_sku = global_sku.drop_duplicates(["SKU"])
-        global_sku = global_sku.drop(columns=[c for c in ["categoria", "departamento", "periodo_tipo", "periodo"] if c in global_sku.columns])
-        merged = base.merge(global_sku, on="SKU", how="left")
+        dedup_cols_global = [c for c in ["SKU", "categoria_est_socio"] if c in global_sku.columns]
+        global_sku = global_sku.drop_duplicates(dedup_cols_global)
+        drop_from_global = [c for c in ["categoria", "departamento", "periodo_tipo", "periodo"] if c in global_sku.columns]
+        global_sku = global_sku.drop(columns=drop_from_global)
+        merge_on_global = [c for c in ["SKU", "categoria_est_socio"] if c in global_sku.columns and c in base.columns]
+        if not merge_on_global:
+            merge_on_global = ["SKU"]
+        merged = base.merge(global_sku, on=merge_on_global, how="left")
         merged["tipo_elasticidad_usada"] = "elasticidad_sku_global"
         candidates.append(merged)
 
