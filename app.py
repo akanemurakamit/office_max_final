@@ -56,42 +56,381 @@ st.set_page_config(
 
 CUSTOM_CSS = """
 <style>
-    .main .block-container {padding-top: 1.4rem;}
-    .kpi-card {
-        border: 1px solid #e5e7eb;
-        border-radius: 16px;
-        padding: 18px 18px;
-        background: #ffffff;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.06);
-        min-height: 112px;
-    }
-    .kpi-title {
-        color: #4b5563;
-        font-size: 0.88rem;
-        font-weight: 600;
-        margin-bottom: 8px;
-    }
-    .kpi-value {
-        color: #111827;
-        font-size: 1.65rem;
-        font-weight: 800;
-        line-height: 1.15;
-    }
-    .kpi-subtitle {
-        color: #6b7280;
-        font-size: 0.78rem;
-        margin-top: 8px;
-    }
-    .section-card {
-        border: 1px solid #e5e7eb;
-        border-radius: 16px;
-        padding: 18px;
-        background: #f9fafb;
-        margin-bottom: 16px;
-    }
+/* ── Palette variables ─────────────────────────────────────────── */
+:root {
+    --charcoal:   #1C1C1C;
+    --charcoal2:  #242424;
+    --charcoal3:  #2E2E2E;
+    --yellow:     #F5C518;
+    --yellow-dim: #C49A00;
+    --yellow-lt:  #FFE566;
+    --bone:       #F5F0E8;
+    --gray:       #9E9E9E;
+    --gray-dark:  #3A3A3A;
+}
+
+/* ── Global ────────────────────────────────────────────────────── */
+html, body, [data-testid="stAppViewContainer"],
+[data-testid="stApp"], .stApp {
+    background-color: var(--charcoal) !important;
+    color: var(--bone) !important;
+}
+.main .block-container {
+    padding-top: 1.4rem;
+    background-color: var(--charcoal) !important;
+}
+
+/* ── Sidebar ───────────────────────────────────────────────────── */
+[data-testid="stSidebar"],
+[data-testid="stSidebar"] > div:first-child {
+    background-color: var(--charcoal2) !important;
+    border-right: 1px solid var(--gray-dark) !important;
+}
+[data-testid="stSidebar"] * {
+    color: var(--bone) !important;
+}
+[data-testid="stSidebar"] .stButton > button {
+    background-color: var(--yellow) !important;
+    color: var(--charcoal) !important;
+    border: none !important;
+    font-weight: 700 !important;
+}
+[data-testid="stSidebar"] .stButton > button:hover {
+    background-color: var(--yellow-lt) !important;
+}
+
+/* ── Typography ────────────────────────────────────────────────── */
+h1, h2, h3, h4, h5, h6 {
+    color: var(--bone) !important;
+    font-weight: 700 !important;
+    letter-spacing: -0.01em;
+}
+p, li, label, span, div {
+    color: var(--bone);
+}
+.stCaption, [data-testid="stCaptionContainer"] {
+    color: var(--gray) !important;
+}
+
+/* ── Buttons ───────────────────────────────────────────────────── */
+.stButton > button {
+    background-color: var(--charcoal3) !important;
+    color: var(--bone) !important;
+    border: 1px solid var(--gray-dark) !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+    transition: border-color 0.15s, color 0.15s;
+}
+.stButton > button:hover {
+    border-color: var(--yellow) !important;
+    color: var(--yellow) !important;
+}
+.stButton > button[kind="primary"],
+button[data-testid="baseButton-primary"] {
+    background-color: var(--yellow) !important;
+    color: var(--charcoal) !important;
+    border: none !important;
+    font-weight: 700 !important;
+}
+.stButton > button[kind="primary"]:hover,
+button[data-testid="baseButton-primary"]:hover {
+    background-color: var(--yellow-lt) !important;
+}
+
+/* ── Inputs: select, text, number ─────────────────────────────── */
+[data-testid="stSelectbox"] > div > div,
+[data-testid="stMultiSelect"] > div > div,
+.stSelectbox > div > div {
+    background-color: var(--charcoal3) !important;
+    border: 1px solid var(--gray-dark) !important;
+    border-radius: 8px !important;
+    color: var(--bone) !important;
+}
+[data-testid="stSelectbox"] > div > div:focus-within,
+[data-testid="stMultiSelect"] > div > div:focus-within {
+    border-color: var(--yellow) !important;
+    box-shadow: 0 0 0 1px var(--yellow) !important;
+}
+[data-baseweb="select"] * { color: var(--bone) !important; }
+[data-baseweb="popover"],
+[data-baseweb="menu"] {
+    background-color: var(--charcoal2) !important;
+    border: 1px solid var(--gray-dark) !important;
+}
+[role="option"]:hover,
+[aria-selected="true"] {
+    background-color: var(--charcoal3) !important;
+    color: var(--yellow) !important;
+}
+input, textarea {
+    background-color: var(--charcoal3) !important;
+    color: var(--bone) !important;
+    border: 1px solid var(--gray-dark) !important;
+    border-radius: 8px !important;
+}
+input:focus, textarea:focus {
+    border-color: var(--yellow) !important;
+    box-shadow: 0 0 0 1px var(--yellow) !important;
+    outline: none !important;
+}
+
+/* ── Radio buttons ─────────────────────────────────────────────── */
+[data-testid="stRadio"] label {
+    color: var(--bone) !important;
+}
+[data-testid="stRadio"] div[role="radiogroup"] label:has(input:checked) {
+    color: var(--yellow) !important;
+    font-weight: 700 !important;
+}
+[data-testid="stRadio"] div[role="radiogroup"] input[type="radio"]:checked + div {
+    background-color: var(--yellow) !important;
+    border-color: var(--yellow) !important;
+}
+
+/* ── Checkboxes / toggles ──────────────────────────────────────── */
+[data-testid="stCheckbox"] label { color: var(--bone) !important; }
+[data-baseweb="checkbox"] div { border-color: var(--gray-dark) !important; }
+
+/* ── Sliders ───────────────────────────────────────────────────── */
+[data-testid="stSlider"] .st-bw { background-color: var(--yellow) !important; }
+[data-testid="stSlider"] [data-testid="stThumbValue"] { color: var(--yellow) !important; }
+
+/* ── Metrics ───────────────────────────────────────────────────── */
+[data-testid="stMetric"] {
+    background-color: var(--charcoal2) !important;
+    border: 1px solid var(--gray-dark) !important;
+    border-radius: 10px !important;
+    padding: 16px !important;
+}
+[data-testid="stMetricLabel"] { color: var(--gray) !important; font-size: 0.82rem !important; }
+[data-testid="stMetricValue"] { color: var(--bone) !important; font-weight: 800 !important; }
+[data-testid="stMetricDelta"] { color: var(--yellow) !important; }
+
+/* ── Dataframes / tables ───────────────────────────────────────── */
+[data-testid="stDataFrame"],
+[data-testid="stTable"] {
+    border: 1px solid var(--gray-dark) !important;
+    border-radius: 10px !important;
+    overflow: hidden;
+}
+iframe[title="st_aggrid"], .streamlit-table {
+    background-color: var(--charcoal2) !important;
+}
+
+/* ── Alerts / info boxes ───────────────────────────────────────── */
+[data-testid="stAlert"] {
+    border-radius: 8px !important;
+    border-left: 3px solid var(--yellow) !important;
+    background-color: var(--charcoal2) !important;
+}
+[data-testid="stAlert"][data-type="info"] {
+    border-left-color: var(--yellow) !important;
+}
+[data-testid="stAlert"][data-type="success"] {
+    border-left-color: #4CAF50 !important;
+}
+[data-testid="stAlert"][data-type="warning"] {
+    border-left-color: #FF9800 !important;
+}
+[data-testid="stAlert"][data-type="error"] {
+    border-left-color: #F44336 !important;
+}
+
+/* ── Expanders ─────────────────────────────────────────────────── */
+[data-testid="stExpander"] {
+    border: 1px solid var(--gray-dark) !important;
+    border-radius: 10px !important;
+    background-color: var(--charcoal2) !important;
+}
+[data-testid="stExpander"] summary {
+    color: var(--bone) !important;
+    font-weight: 600 !important;
+}
+[data-testid="stExpander"] summary:hover {
+    color: var(--yellow) !important;
+}
+
+/* ── Tabs ──────────────────────────────────────────────────────── */
+[data-testid="stTabs"] [role="tab"] {
+    color: var(--gray) !important;
+    border-bottom: 2px solid transparent !important;
+    font-weight: 600 !important;
+    background: transparent !important;
+}
+[data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+    color: var(--yellow) !important;
+    border-bottom-color: var(--yellow) !important;
+}
+
+/* ── Dividers ──────────────────────────────────────────────────── */
+hr { border-color: var(--gray-dark) !important; }
+
+/* ── Download button ───────────────────────────────────────────── */
+[data-testid="stDownloadButton"] > button {
+    background-color: var(--charcoal3) !important;
+    border: 1px solid var(--yellow-dim) !important;
+    color: var(--yellow) !important;
+    border-radius: 8px !important;
+    font-weight: 600 !important;
+}
+[data-testid="stDownloadButton"] > button:hover {
+    background-color: var(--yellow) !important;
+    color: var(--charcoal) !important;
+}
+
+/* ── Sidebar nav radio (vista selector) ────────────────────────── */
+/* Remove any background highlight on the selected label row */
+[data-testid="stSidebar"] [data-testid="stRadio"] label,
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) {
+    background-color: transparent !important;
+    color: var(--bone) !important;
+}
+/* Label text: same weight checked vs unchecked — no colour change */
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) span,
+[data-testid="stSidebar"] [data-testid="stRadio"] label span {
+    color: var(--bone) !important;
+    font-weight: 400 !important;
+}
+[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked) span {
+    font-weight: 600 !important;
+}
+/* Only the radio circle dot turns yellow */
+[data-testid="stSidebar"] [data-baseweb="radio"] input:checked + div {
+    background-color: var(--yellow) !important;
+    border-color: var(--yellow) !important;
+}
+
+/* ── Info popover button — minimal circular "i" ─────────────────── */
+/* Target the button Streamlit generates for st.popover() */
+[data-testid="stSidebar"] [data-testid="stPopover"] > button,
+[data-testid="stSidebar"] button[data-testid="stPopoverButton"] {
+    background: transparent !important;
+    border: 1px solid var(--gray-dark) !important;
+    border-radius: 50% !important;
+    color: var(--gray) !important;
+    width: 20px !important;
+    height: 20px !important;
+    min-height: unset !important;
+    padding: 0 !important;
+    font-size: 0.72rem !important;
+    font-style: italic !important;
+    font-weight: 700 !important;
+    line-height: 20px !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-shadow: none !important;
+    margin-bottom: 6px !important;
+}
+[data-testid="stSidebar"] [data-testid="stPopover"] > button:hover,
+[data-testid="stSidebar"] button[data-testid="stPopoverButton"]:hover {
+    border-color: var(--yellow) !important;
+    color: var(--yellow) !important;
+}
+
+/* ── Sidebar success messages: no green background ──────────────── */
+[data-testid="stSidebar"] [data-testid="stAlert"][data-type="success"],
+[data-testid="stSidebar"] .stAlert {
+    background-color: var(--charcoal3) !important;
+    border-left-color: var(--yellow) !important;
+    color: var(--bone) !important;
+}
+[data-testid="stSidebar"] [data-testid="stAlert"][data-type="success"] * {
+    color: var(--bone) !important;
+}
+
+/* ── Spinner ───────────────────────────────────────────────────── */
+[data-testid="stSpinner"] * { color: var(--yellow) !important; }
+
+/* ── Progress bar ──────────────────────────────────────────────── */
+[data-testid="stProgressBar"] > div { background-color: var(--yellow) !important; }
+
+/* ── KPI cards (custom HTML component) ────────────────────────── */
+.kpi-card {
+    border: 1px solid var(--gray-dark);
+    border-radius: 12px;
+    padding: 18px;
+    background: var(--charcoal2);
+    min-height: 110px;
+}
+.kpi-title {
+    color: var(--gray);
+    font-size: 0.82rem;
+    font-weight: 600;
+    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.kpi-value {
+    color: var(--bone);
+    font-size: 1.65rem;
+    font-weight: 800;
+    line-height: 1.15;
+}
+.kpi-subtitle {
+    color: var(--gray);
+    font-size: 0.78rem;
+    margin-top: 6px;
+}
+.section-card {
+    border: 1px solid var(--gray-dark);
+    border-radius: 12px;
+    padding: 18px;
+    background: var(--charcoal2);
+    margin-bottom: 16px;
+}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
+
+
+# =========================================================
+# Plotly chart theme helper
+# =========================================================
+
+# Shared yellow-tone palette for all charts
+_CHART_COLORS = ["#F5C518", "#FFE566", "#C49A00", "#FFF0A0", "#A07800", "#FFD700", "#E8B800", "#FFEC8B"]
+_CHART_BG      = "#1C1C1C"
+_CHART_PAPER   = "#1C1C1C"
+_CHART_GRID    = "#2E2E2E"
+_CHART_TEXT    = "#F5F0E8"
+_CHART_AXIS    = "#9E9E9E"
+
+
+def _theme_chart(fig, title: str | None = None):
+    """Apply the dark charcoal/yellow theme to any Plotly figure. Returns fig."""
+    import plotly.graph_objects as go
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=_CHART_PAPER,
+        plot_bgcolor=_CHART_BG,
+        font=dict(color=_CHART_TEXT, family="sans-serif"),
+        title=dict(text=title or fig.layout.title.text or "", font=dict(color=_CHART_TEXT, size=14, weight=700), x=0),
+        legend=dict(bgcolor="rgba(0,0,0,0)", bordercolor=_CHART_GRID, font=dict(color=_CHART_TEXT)),
+        xaxis=dict(
+            gridcolor=_CHART_GRID, linecolor=_CHART_GRID,
+            tickfont=dict(color=_CHART_AXIS), title_font=dict(color=_CHART_AXIS),
+            zeroline=False,
+        ),
+        yaxis=dict(
+            gridcolor=_CHART_GRID, linecolor=_CHART_GRID,
+            tickfont=dict(color=_CHART_AXIS), title_font=dict(color=_CHART_AXIS),
+            zeroline=False,
+        ),
+        margin=dict(l=48, r=16, t=48, b=40),
+    )
+    # Apply yellow palette to all traces that have a default color sequence
+    for i, trace in enumerate(fig.data):
+        color = _CHART_COLORS[i % len(_CHART_COLORS)]
+        if hasattr(trace, "marker") and trace.marker and not (
+            hasattr(trace.marker, "color") and trace.marker.color is not None
+            and not isinstance(trace.marker.color, str)
+        ):
+            if isinstance(getattr(trace.marker, "color", None), str) or trace.marker.color is None:
+                trace.marker.color = color
+        if hasattr(trace, "line") and trace.line and not trace.line.color:
+            trace.line.color = color
+    return fig
 
 
 # =========================================================
@@ -686,10 +1025,11 @@ def render_sidebar() -> str:
     st.sidebar.subheader("Archivos")
 
     with st.sidebar.expander("A. Base de ventas obligatoria", expanded=True):
-        st.info(
-            "Sube CSV, Excel o Parquet con ventas. Columnas mínimas: "
-            "`tran_date`, `qty`, `net_sale`, `prod_nbr`, `costo2`."
-        )
+        with st.popover("i"):
+            st.markdown(
+                "Sube CSV, Excel o Parquet con ventas. Columnas mínimas: "
+                "`tran_date`, `qty`, `net_sale`, `prod_nbr`, `costo2`."
+            )
         sales_file = st.file_uploader(
             "Base de ventas",
             type=["csv", "xlsx", "xls", "parquet"],
@@ -697,10 +1037,11 @@ def render_sidebar() -> str:
         )
 
     with st.sidebar.expander("B. Base de promociones opcional", expanded=False):
-        st.info(
-            "Opcional. Si no se carga, la app funciona sin promociones. "
-            "Se lee solo al presionar `Procesar / actualizar datos`."
-        )
+        with st.popover("i"):
+            st.markdown(
+                "Opcional. Si no se carga, la app funciona sin promociones. "
+                "Se lee solo al presionar `Procesar / actualizar datos`."
+            )
         promo_file = st.file_uploader(
             "Base de promociones",
             type=["csv", "xlsx", "xls", "parquet"],
@@ -708,12 +1049,13 @@ def render_sidebar() -> str:
         )
 
     with st.sidebar.expander("C. Configuración de nivel socioeconómico", expanded=False):
-        st.info(
-            "Por defecto se usa la base **INEGI hogares** precargada para asignar el nivel "
-            "socioeconómico. El catálogo geográfico (`catalogo_ubica_geo`) se carga "
-            "automáticamente — no requiere acción. Si lo necesitas, puedes sustituir la "
-            "base de hogares por una propia."
-        )
+        with st.popover("i"):
+            st.markdown(
+                "Por defecto se usa la base **INEGI hogares** precargada para asignar el nivel "
+                "socioeconómico. El catálogo geográfico (`catalogo_ubica_geo`) se carga "
+                "automáticamente — no requiere acción. Si lo necesitas, puedes sustituir la "
+                "base de hogares por una propia."
+            )
 
         default_nse = build_default_nse()
         st.caption(f"Base NSE activa: `{get_default_nse_path()}`")
@@ -1441,8 +1783,10 @@ def _render_graficas_futuro(selected: pd.DataFrame) -> None:
         fig = px.bar(
             long, x="nombre_escenario", y="valor", color="tipo", barmode="group",
             category_orders={"tipo": [base_lbl, proj_lbl]}, title=titulo,
+            color_discrete_sequence=["#FFE566", "#F5C518"],
         )
         fig.update_layout(xaxis_title="Escenario", yaxis_title=eje_y, legend_title="")
+        _theme_chart(fig)
         st.plotly_chart(fig, use_container_width=True)
 
     g1, g2 = st.columns(2)
@@ -1932,8 +2276,10 @@ def render_promociones_historico(selected: pd.DataFrame) -> None:
         serie, x="semana", y="unidades", color="fase",
         category_orders={"fase": ["Antes", "Durante", "Después"]},
         title=f"Ventas semanales del SKU {sku_promo}: antes, durante y después de la promoción",
+        color_discrete_map={"Antes": "#C49A00", "Durante": "#F5C518", "Después": "#FFE566"},
     )
     fig.update_layout(xaxis_title="Semana", yaxis_title="Unidades vendidas", legend_title="Fase")
+    _theme_chart(fig)
     st.plotly_chart(fig, use_container_width=True)
 
     resumen = (
@@ -2061,7 +2407,9 @@ def render_historical_pricing_view() -> None:
     )
     if not chart.empty:
         chart_long = chart.melt(id_vars="nombre_escenario", var_name="métrica", value_name="monto")
-        fig = px.bar(chart_long, x="nombre_escenario", y="monto", color="métrica", barmode="group", title="Real vs simulado por escenario histórico")
+        fig = px.bar(chart_long, x="nombre_escenario", y="monto", color="métrica", barmode="group", title="Real vs simulado por escenario histórico",
+                     color_discrete_sequence=["#FFE566", "#F5C518", "#C49A00", "#FFF0A0"])
+        _theme_chart(fig)
         st.plotly_chart(fig, use_container_width=True)
 
     render_promociones_historico(selected)
@@ -2139,13 +2487,13 @@ def render_quality_view() -> None:
 
     if not semaforo.empty:
         row = semaforo.iloc[0]
-        color = "#dc2626" if "Rojo" in row["Semaforo"] else "#f59e0b" if "Amarillo" in row["Semaforo"] else "#16a34a"
+        color = "#dc2626" if "Rojo" in row["Semaforo"] else "#f59e0b" if "Amarillo" in row["Semaforo"] else "#F5C518"
         st.markdown(
             f"""
-            <div style="border:2px solid {color}; border-radius:16px; padding:18px; background:#ffffff;">
-                <h3 style="margin-top:0;">Semáforo de calidad: {row['Semaforo']}</h3>
-                <p style="margin-bottom:0;">{row['Interpretacion']}</p>
-                <small>{row['Motivos']}</small>
+            <div style="border:2px solid {color}; border-radius:16px; padding:18px; background:transparent;">
+                <h3 style="margin-top:0; color:#F5F0E8;">Semáforo de calidad: {row['Semaforo']}</h3>
+                <p style="margin-bottom:0; color:#F5F0E8;">{row['Interpretacion']}</p>
+                <small style="color:#9E9E9E;">{row['Motivos']}</small>
             </div>
             """,
             unsafe_allow_html=True,
@@ -2627,6 +2975,7 @@ def render_elasticity_view() -> None:
                         color="Promoción",
                         markers=True,
                         title="Demanda semanal con/sin promoción",
+                        color_discrete_sequence=["#F5C518", "#FFE566"],
                     )
                 else:
                     fig = px.line(
@@ -2635,8 +2984,10 @@ def render_elasticity_view() -> None:
                         y="Demanda",
                         markers=True,
                         title="Demanda semanal",
+                        color_discrete_sequence=["#F5C518"],
                     )
                 fig.update_layout(xaxis_title="Semana", yaxis_title="Unidades")
+                _theme_chart(fig)
 
                 st.plotly_chart(
                     fig,
@@ -2657,8 +3008,10 @@ def render_elasticity_view() -> None:
                 y="Demanda estimada",
                 color="SKU",
                 title="Curva precio-demanda log-log por SKU (Q = Q₀·(P/P₀)^elasticidad)",
+                color_discrete_sequence=_CHART_COLORS,
             )
             fig_curva.update_layout(xaxis_title="Precio", yaxis_title="Demanda estimada")
+            _theme_chart(fig_curva)
             st.plotly_chart(fig_curva, use_container_width=True)
             st.caption(
                 "Cada curva muestra cómo cambiaría la demanda estimada al variar el precio, "
@@ -2828,12 +3181,21 @@ def render_elasticity_view() -> None:
                     },
                     scope="north america",
                     title="Intensidad de elasticidad absoluta por estado",
+                    color_continuous_scale=["#3A3A3A", "#C49A00", "#F5C518", "#FFE566"],
                 )
 
                 fig.update_geos(
                     fitbounds="locations",
                     visible=True,
+                    bgcolor=_CHART_BG,
+                    landcolor="#2E2E2E",
+                    oceancolor="#1C1C1C",
+                    lakecolor="#1C1C1C",
+                    showland=True,
+                    showocean=True,
+                    countrycolor="#3A3A3A",
                 )
+                _theme_chart(fig)
 
                 st.plotly_chart(
                     fig,
@@ -3022,7 +3384,9 @@ def render_pricing_view() -> None:
             color="Serie",
             markers=True,
             title="Ventas normales vs ventas simuladas",
+            color_discrete_sequence=["#FFE566", "#F5C518"],
         )
+        _theme_chart(fig)
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("No hay datos suficientes para graficar ventas en dinero.")
@@ -3037,7 +3401,9 @@ def render_pricing_view() -> None:
             color="Serie",
             markers=True,
             title="Cantidad normal vs cantidad simulada",
+            color_discrete_sequence=["#FFE566", "#F5C518"],
         )
+        _theme_chart(fig)
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("No hay datos suficientes para graficar ventas en cantidad.")
@@ -3052,7 +3418,9 @@ def render_pricing_view() -> None:
             color="Métrica",
             barmode="group",
             title="Ingreso simulado vs margen simulado",
+            color_discrete_sequence=["#F5C518", "#FFE566", "#C49A00"],
         )
+        _theme_chart(fig)
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.warning("No hay datos suficientes para graficar ingreso vs margen.")
