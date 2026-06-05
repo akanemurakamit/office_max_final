@@ -261,6 +261,26 @@ def _build_elasticity_candidates(demanda: pd.DataFrame, elasticidades_periodo: p
     out = pd.concat(candidates, ignore_index=True, sort=False)
     out = out.dropna(subset=["elasticidad"])
     out = out.rename(columns={"elasticidad": "elasticidad_usada"})
+    if out.empty:
+        return out
+    # Deduplicar: conservar la MEJOR fuente por SKU-horizonte-NSE antes del join
+    # cartesiano de escenarios para minimizar la explosión de filas.
+    # Prioridad: elasticidad_sku_reciente > elasticidad_sku_global > elasticidad_categoria_departamento
+    _fuente_rank = {
+        "elasticidad_sku_reciente": 0,
+        "elasticidad_sku_global": 1,
+        "elasticidad_categoria_departamento": 2,
+    }
+    out["_src_rank"] = out["tipo_elasticidad_usada"].map(_fuente_rank).fillna(9)
+    dedup_key = [c for c in ["SKU", "horizonte", "metodo_proyeccion", "categoria_est_socio"] if c in out.columns]
+    if not dedup_key:
+        dedup_key = ["SKU", "horizonte"] if "horizonte" in out.columns else ["SKU"]
+    out = (
+        out.sort_values("_src_rank", kind="stable")
+        .drop_duplicates(dedup_key, keep="first")
+        .drop(columns="_src_rank")
+        .reset_index(drop=True)
+    )
     return out
 
 
@@ -386,8 +406,17 @@ def build_pricing_futuro_escenarios(
 
     sim["confianza_elasticidad"] = sim["confianza_elasticidad"].fillna("No usable")
     sim["confianza_demanda"] = sim["confianza_demanda"].fillna("No usable")
-    final_rank = sim.apply(lambda r: min(_confidence_rank(r["confianza_elasticidad"]), _confidence_rank(r["confianza_demanda"])), axis=1)
-    sim["confianza_final"] = final_rank.map(_rank_confidence)
+
+    # Confianza final: mínimo de elasticidad y demanda — vectorizado
+    _rank_map = {"alta": 3, "media": 2, "baja": 1}
+    rank_elas = sim["confianza_elasticidad"].str.strip().str.lower().map(_rank_map).fillna(0)
+    rank_dem  = sim["confianza_demanda"].str.strip().str.lower().map(_rank_map).fillna(0)
+    final_rank_vec = np.minimum(rank_elas, rank_dem)
+    sim["confianza_final"] = np.select(
+        [final_rank_vec >= 3, final_rank_vec == 2, final_rank_vec == 1],
+        ["Alta", "Media", "Baja"],
+        default="No usable",
+    )
     missing_cost_promo = sim["costo_unitario"].isna() & es_promocion(sim["tipo_escenario"])
     sim.loc[missing_cost_promo & sim["confianza_final"].eq("Alta"), "confianza_final"] = "Media"
     sim.loc[missing_cost_promo & sim["confianza_final"].eq("Media"), "confianza_final"] = "Baja"
@@ -402,7 +431,7 @@ def build_pricing_futuro_escenarios(
         confianza_elasticidad=sim["confianza_elasticidad"],
     )
 
-    group_cols = ["SKU", "horizonte", "metodo_proyeccion", "tipo_elasticidad_usada"]
+    group_cols = [c for c in ["SKU", "horizonte", "metodo_proyeccion", "tipo_elasticidad_usada", "categoria_est_socio"] if c in sim.columns]
     sim["mejor_escenario"] = False
     eligible = sim[
         sim["confianza_final"].isin(["Alta", "Media"])
@@ -412,21 +441,54 @@ def build_pricing_futuro_escenarios(
         & sim["unidades_simuladas"].gt(0)
     ]
     if not eligible.empty:
+        sort_asc = [True] * len(group_cols) + [False, False, False]
         best_idx = (
-            eligible.assign(_score_margen=eligible["margen_simulado"].fillna(eligible["ingreso_simulado"])).sort_values(
-                group_cols + ["_score_margen", "ingreso_simulado", "unidades_simuladas"],
-                ascending=[True, True, True, True, False, False, False],
-                kind="stable",
-            )
+            eligible.assign(_score_margen=eligible["margen_simulado"].fillna(eligible["ingreso_simulado"]))
+            .sort_values(group_cols + ["_score_margen", "ingreso_simulado", "unidades_simuladas"],
+                         ascending=sort_asc, kind="stable")
             .drop_duplicates(group_cols)
             .index
         )
         sim.loc[best_idx, "mejor_escenario"] = True
 
-    risk_reco = sim.apply(_risk_and_recommendation, axis=1, result_type="expand")
-    sim["riesgo"] = risk_reco[0]
-    sim["recomendacion"] = risk_reco[1]
-    sim["razon_recomendacion"] = risk_reco[2]
+    # Riesgo y recomendación — vectorizado (reemplaza apply(axis=1))
+    es_promo = es_promocion(sim["tipo_escenario"])
+    riesgo_alto_promo = es_promo & sim["riesgo_promocion"].eq("Alto")
+    elasticidad_pos  = sim["elasticidad_usada"].ge(0) & sim["cambio_precio_pct"].ne(0)
+    sin_unidades     = sim["unidades_simuladas"].le(0)
+    margen_negativo  = sim["margen_simulado"].notna() & sim["margen_simulado"].lt(0)
+    cambio_agresivo  = sim["cambio_precio_pct"].abs().ge(15)
+    confianza_baja   = sim["confianza_final"].isin(["No usable", "Baja"])
+
+    riesgo = pd.Series("Bajo", index=sim.index)
+    riesgo = riesgo.where(~(riesgo_alto_promo | elasticidad_pos | sin_unidades | margen_negativo | (cambio_agresivo & confianza_baja)), "Alto")
+    riesgo = riesgo.where(riesgo.eq("Alto") | ~cambio_agresivo, "Medio")
+
+    rec   = pd.Series("No preferente", index=sim.index)
+    razon = pd.Series("No supera claramente el escenario base en margen e ingreso.", index=sim.index)
+
+    mask_viable = sim["variacion_margen"].fillna(0).gt(0) & sim["variacion_ingreso"].fillna(0).ge(0)
+    rec[mask_viable]   = "Escenario viable"
+    razon[mask_viable] = "Mejora margen sin deteriorar ingreso frente a la demanda base futura."
+
+    mask_mantener = sim["cambio_precio_pct"].eq(0)
+    rec[mask_mantener]   = "Mantener como referencia"
+    razon[mask_mantener] = "Escenario base contra el cual se comparan los cambios de precio futuros."
+
+    mask_mejor = sim["mejor_escenario"].fillna(False).astype(bool)
+    sin_costo = sim["margen_simulado"].isna()
+    rec[mask_mejor & ~sin_costo]   = "Recomendar"
+    razon[mask_mejor & ~sin_costo] = "Maximiza margen simulado futuro entre escenarios válidos del mismo SKU, horizonte, método y elasticidad."
+    rec[mask_mejor & sin_costo]    = "Recomendar"
+    razon[mask_mejor & sin_costo]  = "Maximiza ingreso simulado futuro. No se cuenta con costo unitario, por lo que la recomendación se basa en ingreso y no en margen."
+
+    mask_no_rec = riesgo.eq("Alto")
+    rec[mask_no_rec]   = "No recomendar"
+    razon[mask_no_rec] = "Escenario sospechoso: riesgo alto por elasticidad, unidades, margen o cambio de precio agresivo con baja confianza."
+
+    sim["riesgo"]           = riesgo
+    sim["recomendacion"]    = rec
+    sim["razon_recomendacion"] = razon
 
     sim["cambio_precio_pct"] = sim["cambio_precio_pct"] * 100
     sim["descuento_efectivo"] = sim["descuento_efectivo"] * 100
