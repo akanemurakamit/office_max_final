@@ -129,6 +129,15 @@ def _normalize_demanda(demanda_base_futura: pd.DataFrame) -> pd.DataFrame:
 def _build_price_base(ventas_precios: pd.DataFrame | None, demanda: pd.DataFrame) -> pd.DataFrame:
     """Obtiene precio actual/lista/costo por SKU desde ventas o desde demanda si ya vienen allí."""
     price_cols = ["precio_actual", "precio_lista", "costo_unitario"]
+    # Si ya viene pre-computado como tabla SKU-precio (p.ej. desde _build_price_base_cached),
+    # devolverlo directamente sin reprocesar las ventas completas.
+    if ventas_precios is not None and not ventas_precios.empty and "precio_actual" in ventas_precios.columns and "SKU" in ventas_precios.columns:
+        out = ventas_precios[["SKU", *[c for c in price_cols if c in ventas_precios.columns]]].copy()
+        if "precio_lista" not in out.columns:
+            out["precio_lista"] = out["precio_actual"]
+        if "costo_unitario" not in out.columns:
+            out["costo_unitario"] = np.nan
+        return out
     if ventas_precios is None or ventas_precios.empty:
         available = [col for col in ["SKU", *price_cols] if col in demanda.columns]
         if "SKU" not in available or "precio_actual" not in available:

@@ -515,6 +515,7 @@ def simulate_pricing_cached(
     return simulate_pricing_scenarios(ventas_base_elasticidad, elasticidad, bloques)
 
 
+@st.cache_data(show_spinner=False, max_entries=5)
 def build_demand_forecast_cached(
     ventas_nse: pd.DataFrame,
     metodos: tuple[str, ...] | None = None,
@@ -549,15 +550,30 @@ def build_demand_forecast_cached(
 
 
 @st.cache_data(show_spinner=False, max_entries=5)
+def _build_price_base_cached(ventas_nse: pd.DataFrame) -> pd.DataFrame:
+    """Extrae precio actual/lista/costo por SKU desde ventas. Resultado pequeño (1 fila/SKU).
+
+    Separado de build_future_pricing_cached para evitar pasar el DataFrame completo
+    de ventas (50k+ filas) como argumento — Streamlit lo hashea entero en cada llamada.
+    """
+    from modules.future_pricing import _build_price_base
+    return _build_price_base(ventas_nse, pd.DataFrame())
+
+
+@st.cache_data(show_spinner=False, max_entries=5)
 def build_future_pricing_cached(
     demanda_base_futura: pd.DataFrame,
     elasticidades_periodo: pd.DataFrame,
-    ventas_nse: pd.DataFrame,
+    price_base: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Simula pricing futuro usando demanda_base_futura y elasticidades ya calculadas."""
+    """Simula pricing futuro usando demanda_base_futura, elasticidades y precios base por SKU.
+
+    Recibe ``price_base`` (una fila por SKU) en lugar del DataFrame completo de ventas
+    para acelerar el hashing del caché de Streamlit.
+    """
     from modules.future_pricing import build_pricing_futuro_escenarios
 
-    return build_pricing_futuro_escenarios(demanda_base_futura, elasticidades_periodo, ventas_nse)
+    return build_pricing_futuro_escenarios(demanda_base_futura, elasticidades_periodo, price_base)
 
 
 @st.cache_data(show_spinner=False, max_entries=5)
@@ -565,16 +581,18 @@ def build_recommendations_cached(
     pricing_futuro_escenarios: pd.DataFrame,
     elasticidades_periodo: pd.DataFrame,
     demanda_base_futura: pd.DataFrame,
-    ventas_nse: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Fase 7: motor de recomendaciones híbrido (reglas + simulación; RF opcional desactivado)."""
+    """Fase 7: motor de recomendaciones híbrido (reglas + simulación; RF opcional desactivado).
+
+    ventas_nse se eliminó de la firma porque generar_recomendaciones no lo usa;
+    su presencia solo ralentizaba el hashing del caché de Streamlit (50k+ filas).
+    """
     from modules.recommendations import generar_recomendaciones
 
     return generar_recomendaciones(
         pricing_futuro_escenarios,
         elasticidades_periodo,
         demanda_base_futura,
-        ventas_nse,
     )
 
 
@@ -1617,10 +1635,11 @@ def ensure_future_pricing_ready() -> bool:
                     pesos_manual=pesos_manual,
                     mes_inicio_proyeccion=mes_inicio,
                 )
+                price_base = _build_price_base_cached(st.session_state.ventas_nse)
                 pricing_futuro_escenarios = build_future_pricing_cached(
                     demanda_base_futura,
                     elasticidades_periodo,
-                    st.session_state.ventas_nse,
+                    price_base,
                 )
             cache_pr.clear()
             cache_pr[pricing_key] = (demanda_base_futura, pricing_futuro_escenarios)
@@ -2050,7 +2069,6 @@ def ensure_recommendations_ready() -> bool:
                     sim,
                     st.session_state.get("elasticidades_periodo", pd.DataFrame()),
                     st.session_state.get("demanda_base_futura", pd.DataFrame()),
-                    st.session_state.ventas_nse,
                 )
             cache_re.clear()
             cache_re[reco_key] = recomendaciones

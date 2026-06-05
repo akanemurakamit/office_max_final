@@ -235,6 +235,79 @@ def _sku_components(sku_monthly: pd.DataFrame, last_month: pd.Period, target_sta
     return components
 
 
+def _compute_all_components_batch(
+    monthly: pd.DataFrame,
+    anchor_month: pd.Period,
+    target_start: pd.Period,
+) -> dict[str, dict[str, pd.Series]]:
+    """
+    Versión vectorizada de _sku_components: calcula todos los componentes de ventana
+    para TODOS los SKUs en una sola pasada de operaciones pandas, en lugar de iterar
+    SKU por SKU con groupby. Retorna un dict {componente: {campo: Series indexada por SKU}}.
+
+    Esto elimina el cuello de botella del for-loop sobre SKUs en build_demanda_base_futura.
+    """
+    target_month   = target_start.month
+    target_quarter = target_start.quarter
+    quarter_months = {p.month for p in pd.period_range(target_start, target_start + 2, freq="M")}
+
+    # Pivot: filas=SKU, columnas=mes -> unidades (NaN si no hay venta ese mes)
+    hist = monthly[monthly["mes"] <= anchor_month].copy()
+    if hist.empty:
+        return {}
+
+    pivot = (
+        hist.pivot_table(index="SKU", columns="mes", values="unidades", aggfunc="sum")
+        .sort_index(axis=1)
+    )
+
+    result: dict[str, dict[str, pd.Series]] = {}
+    min_v = DEMANDA_FUTURA_MIN_MESES_VENTANA
+
+    for window, key in [(3, "ultimos_3_meses"), (6, "ultimos_6_meses"), (12, "ultimos_12_meses"), (24, "ultimos_24_meses")]:
+        months_in_window = pd.period_range(anchor_month - window + 1, anchor_month, freq="M")
+        sub = pivot.reindex(columns=months_in_window)
+        count_ser = sub.notna().sum(axis=1)
+        mean_ser  = sub.mean(axis=1)  # NaN where all missing
+        min_m = min_v[key]
+        available_ser = count_ser.ge(min_m)
+        valor_1m = mean_ser.where(available_ser)
+        result[key] = {
+            "valor_1m":        valor_1m,
+            "valor_3m":        valor_1m * 3,
+            "disponible":      available_ser,
+            "meses_disponibles": count_ser,
+        }
+
+    # Mismo mes histórico
+    same_month_sub = hist[hist["month"] == target_month]
+    sm_agg = same_month_sub.groupby("SKU", observed=True)["unidades"].agg(["mean", "count"])
+    sm_mean  = pivot.index.to_series().map(sm_agg["mean"])
+    sm_count = pivot.index.to_series().map(sm_agg["count"]).fillna(0).astype(int)
+    sm_avail = sm_count.ge(min_v["mismo_mes_historico"])
+    result["mismo_mes_historico"] = {
+        "valor_1m":        sm_mean.where(sm_avail),
+        "valor_3m":        pd.Series(np.nan, index=pivot.index),
+        "disponible":      sm_avail,
+        "meses_disponibles": sm_count,
+    }
+
+    # Mismo trimestre histórico
+    same_q_sub = hist[hist["month"].isin(quarter_months) & (hist["quarter"] == target_quarter)]
+    sq_agg = same_q_sub.groupby("SKU", observed=True)["unidades"].agg(["mean", "count"])
+    sq_mean  = pivot.index.to_series().map(sq_agg["mean"])
+    sq_count = pivot.index.to_series().map(sq_agg["count"]).fillna(0).astype(int)
+    sq_avail = sq_count.ge(min_v["mismo_trimestre_historico"])
+    result["mismo_trimestre_historico"] = {
+        "valor_1m":        pd.Series(np.nan, index=pivot.index),
+        "valor_3m":        (sq_mean * 3).where(sq_avail),
+        "disponible":      sq_avail,
+        "meses_disponibles": sq_count,
+    }
+
+    return result
+
+
 def _weights_for_method(horizonte: str, metodo: str, pesos_config: dict) -> dict[str, float]:
     if metodo == "Reciente":
         return {"ultimos_3_meses": 1.0} if horizonte == "1 mes" else {"ultimos_6_meses": 1.0}
@@ -258,7 +331,18 @@ def _redistribute_weights(raw_weights: dict[str, float], components: dict, value
     return {name: weight / total for name, weight in available.items()}, missing
 
 
-def _classify_confidence(components: dict, weights_used: dict[str, float], missing: list[str], sku_monthly: pd.DataFrame) -> tuple[str, str]:
+def _classify_confidence(
+    components: dict,
+    weights_used: dict[str, float],
+    missing: list[str],
+    sku_monthly: pd.DataFrame,
+    cv_precomp: float | None = None,
+) -> tuple[str, str]:
+    """Clasifica confianza de la proyección.
+
+    ``cv_precomp`` permite pasar el coeficiente de variación pre-calculado para
+    todos los SKUs a la vez (evita recomputed por SKU en el bucle principal).
+    """
     if not weights_used:
         return "No usable", "No hay datos suficientes en ninguna ventana de demanda."
 
@@ -269,13 +353,19 @@ def _classify_confidence(components: dict, weights_used: dict[str, float], missi
     recent_ok = any(name in weights_used for name in ["ultimos_3_meses", "ultimos_6_meses"])
     seasonal_ok = any(name in weights_used for name in ["mismo_mes_historico", "mismo_trimestre_historico"])
 
-    units = pd.to_numeric(sku_monthly.sort_values("mes")["unidades"].tail(12), errors="coerce").dropna()
     volatile = False
-    if len(units) >= 3 and units.mean() > 0:
-        cv = float(units.std(ddof=0) / units.mean())
+    if cv_precomp is not None:
+        cv = cv_precomp
         volatile = cv >= DEMANDA_FUTURA_VOLATILIDAD_CV_ALTA
         if volatile:
             reasons.append(f"Demanda muy volátil (CV últimos meses={cv:.2f}).")
+    else:
+        units = pd.to_numeric(sku_monthly.sort_values("mes")["unidades"].tail(12), errors="coerce").dropna()
+        if len(units) >= 3 and units.mean() > 0:
+            cv = float(units.std(ddof=0) / units.mean())
+            volatile = cv >= DEMANDA_FUTURA_VOLATILIDAD_CV_ALTA
+            if volatile:
+                reasons.append(f"Demanda muy volátil (CV últimos meses={cv:.2f}).")
 
     if volatile or (len(weights_used) == 1 and not recent_ok):
         confidence = "Baja"
@@ -338,48 +428,97 @@ def build_demanda_base_futura(
     # ventanas (últimos N meses, mismo mes histórico, etc.) se midan correctamente.
     anchor_month = target_start_global - 1
 
+    # Precomputar todos los componentes para todos los SKUs de una vez (vectorizado).
+    batch = _compute_all_components_batch(monthly, anchor_month, target_start_global)
+
+    # Convertir batch a lookup dicts para acceso O(1) por SKU.
+    # Estructura: lookup[comp_key][field] = {sku: value}
+    lookup: dict[str, dict[str, dict]] = {}
+    for comp_key, fields in batch.items():
+        lookup[comp_key] = {}
+        for field, ser in fields.items():
+            if isinstance(ser, pd.Series):
+                lookup[comp_key][field] = ser.to_dict()
+            else:
+                lookup[comp_key][field] = {}
+
+    # Descriptores por SKU — modo vectorizado para evitar Python-level groupby
+    def _fast_mode_col(df, group_col, value_col, default="Sin dato"):
+        counts = df.groupby([group_col, value_col], observed=True).size().reset_index(name="_n")
+        counts = counts.sort_values("_n", ascending=False).drop_duplicates(group_col)
+        return counts.set_index(group_col)[value_col].rename(value_col)
+
+    cat_mode  = _fast_mode_col(monthly, "SKU", "categoria")
+    dept_mode = _fast_mode_col(monthly, "SKU", "departamento")
+    sku_meta  = pd.DataFrame({"categoria": cat_mode, "departamento": dept_mode}).fillna("Sin dato")
+
+    # Precomputar CV (coeficiente de variación) para todos los SKUs — vectorizado.
+    # Evita llamar sort_values+tail(12) dentro del bucle de _classify_confidence.
+    last12_start = anchor_month - 11
+    recent_monthly = monthly[monthly["mes"].between(last12_start, anchor_month)]
+    sku_cv_raw = (
+        recent_monthly.groupby("SKU", observed=True)["unidades"]
+        .agg(lambda s: float(s.std(ddof=0) / s.mean()) if len(s) >= 3 and s.mean() > 0 else 0.0)
+    )
+    sku_cv_map: dict[str, float] = sku_cv_raw.to_dict()
+
+    sku_monthly_map = {sku: grp for sku, grp in monthly.groupby("SKU", observed=True, sort=False)}
+
     rows = []
-    for sku, sku_monthly in monthly.groupby("SKU", observed=True, sort=False):
-        sku_monthly = sku_monthly.sort_values("mes")
-        categoria = _mode_or_default(sku_monthly["categoria"])
-        departamento = _mode_or_default(sku_monthly["departamento"])
+    all_skus = monthly["SKU"].unique()
 
-        for horizonte in requested_horizons:
-            if horizonte not in HORIZONTES_DEMANDA_FUTURA:
-                raise ValueError(f"Horizonte no soportado: {horizonte}")
-            value_key = "valor_1m" if horizonte == "1 mes" else "valor_3m"
-            target_start = target_start_global
-            start_date, end_date = _projection_dates(anchor_month, horizonte)
-            components = _sku_components(sku_monthly, anchor_month, target_start)
+    for horizonte in requested_horizons:
+        if horizonte not in HORIZONTES_DEMANDA_FUTURA:
+            raise ValueError(f"Horizonte no soportado: {horizonte}")
+        value_key = "valor_1m" if horizonte == "1 mes" else "valor_3m"
+        start_date, end_date = _projection_dates(anchor_month, horizonte)
 
-            for metodo in requested_methods:
-                raw_weights = _weights_for_method(horizonte, metodo, pesos)
+        for metodo in requested_methods:
+            raw_weights = _weights_for_method(horizonte, metodo, pesos)
+
+            for sku in all_skus:
+                # Reconstruir components dict para este SKU desde el lookup precomputado
+                components: dict[str, dict] = {}
+                for comp_key, fields in lookup.items():
+                    components[comp_key] = {
+                        "valor_1m":          fields.get("valor_1m", {}).get(sku, np.nan),
+                        "valor_3m":          fields.get("valor_3m", {}).get(sku, np.nan),
+                        "disponible":        bool(fields.get("disponible", {}).get(sku, False)),
+                        "meses_disponibles": int(fields.get("meses_disponibles", {}).get(sku, 0)),
+                    }
+
                 weights_used, missing = _redistribute_weights(raw_weights, components, value_key)
                 demanda_base = (
-                    sum(components[name][value_key] * weight for name, weight in weights_used.items())
-                    if weights_used
-                    else np.nan
+                    sum(
+                        components[name][value_key] * weight
+                        for name, weight in weights_used.items()
+                        if pd.notna(components[name][value_key])
+                    )
+                    if weights_used else np.nan
                 )
-                confidence, reason = _classify_confidence(components, weights_used, missing, sku_monthly)
+                confidence, reason = _classify_confidence(
+                    components, weights_used, missing,
+                    sku_monthly_map.get(sku, monthly.iloc[:0]),
+                    cv_precomp=sku_cv_map.get(sku),
+                )
 
+                meta = sku_meta.loc[sku] if sku in sku_meta.index else pd.Series({"categoria": "Sin dato", "departamento": "Sin dato"})
                 rows.append(
                     {
                         "SKU": sku,
-                        "categoria": categoria,
-                        "departamento": departamento,
+                        "categoria": meta["categoria"],
+                        "departamento": meta["departamento"],
                         "horizonte": horizonte,
                         "metodo_proyeccion": metodo,
                         "fecha_inicio_proyeccion": start_date,
                         "fecha_fin_proyeccion": end_date,
                         "demanda_base": demanda_base,
-                        "promedio_ultimos_3_meses": components["ultimos_3_meses"]["valor_1m"],
-                        "promedio_ultimos_6_meses": components["ultimos_6_meses"]["valor_1m"],
-                        "promedio_ultimos_12_meses": components["ultimos_12_meses"]["valor_1m"],
-                        "promedio_ultimos_24_meses": components["ultimos_24_meses"]["valor_1m"],
-                        "promedio_mismo_mes_historico": components["mismo_mes_historico"]["valor_1m"],
-                        "promedio_mismo_trimestre_historico": components["mismo_trimestre_historico"]["valor_3m"],
-                        # La especificación exige almacenar los pesos como JSON string,
-                        # no como dict, para que la tabla sea serializable y exportable.
+                        "promedio_ultimos_3_meses":          components.get("ultimos_3_meses", {}).get("valor_1m", np.nan),
+                        "promedio_ultimos_6_meses":          components.get("ultimos_6_meses", {}).get("valor_1m", np.nan),
+                        "promedio_ultimos_12_meses":         components.get("ultimos_12_meses", {}).get("valor_1m", np.nan),
+                        "promedio_ultimos_24_meses":         components.get("ultimos_24_meses", {}).get("valor_1m", np.nan),
+                        "promedio_mismo_mes_historico":      components.get("mismo_mes_historico", {}).get("valor_1m", np.nan),
+                        "promedio_mismo_trimestre_historico": components.get("mismo_trimestre_historico", {}).get("valor_3m", np.nan),
                         "pesos_usados": json.dumps(weights_used, ensure_ascii=False, sort_keys=True),
                         "confianza_demanda": confidence,
                         "razon_confianza_demanda": reason,
