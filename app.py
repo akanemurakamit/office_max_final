@@ -350,28 +350,37 @@ hr { border-color: var(--gray-dark) !important; }
 .kpi-card {
     border: 1px solid var(--gray-dark);
     border-radius: 12px;
-    padding: 18px;
+    padding: 22px 20px;
     background: var(--charcoal2);
-    min-height: 110px;
+    height: 165px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    overflow: hidden;
+    box-sizing: border-box;
 }
 .kpi-title {
     color: var(--gray);
-    font-size: 0.82rem;
+    font-size: 0.92rem;
     font-weight: 600;
-    margin-bottom: 6px;
+    margin-bottom: 10px;
     text-transform: uppercase;
     letter-spacing: 0.04em;
 }
 .kpi-value {
     color: var(--bone);
-    font-size: 1.65rem;
+    font-size: 2.15rem;
     font-weight: 800;
-    line-height: 1.15;
+    line-height: 1.1;
 }
 .kpi-subtitle {
     color: var(--gray);
-    font-size: 0.78rem;
-    margin-top: 6px;
+    font-size: 0.82rem;
+    margin-top: 10px;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
 }
 .section-card {
     border: 1px solid var(--gray-dark);
@@ -1379,7 +1388,6 @@ def ensure_elasticity_ready(show_button: bool = True) -> bool:
         st.session_state.pricing_historico_escenarios = pd.DataFrame()
         st.session_state.demanda_base_futura = pd.DataFrame()
         st.session_state.pricing_futuro_escenarios = pd.DataFrame()
-        st.success("Elasticidad calculada correctamente. Cambiar filtros no volverá a calcularla.")
         return True
     except Exception as exc:
         st.session_state.elasticity_ready = False
@@ -2771,7 +2779,7 @@ def render_elasticity_view() -> None:
             "con los filtros seleccionados."
         )
 
-    with st.expander("Cómo interpretar este dashboard", expanded=True):
+    with st.popover("ⓘ  Cómo interpretar este dashboard"):
         st.markdown(
             """
             La elasticidad mide qué tanto cambia la demanda ante un cambio de precio.
@@ -3046,10 +3054,8 @@ def render_elasticity_view() -> None:
             ).fillna(99)
             nse_summary = nse_summary.sort_values("_ord").drop(columns="_ord")
 
-            col_t, col_c = st.columns([1, 1])
-            with col_t:
-                st.dataframe(nse_summary, use_container_width=True, hide_index=True)
-            with col_c:
+            col_g, col_t = st.columns([1, 1])
+            with col_g:
                 chart_nse = nse_summary[nse_summary["elasticidad promedio"].notna()].copy()
                 if not chart_nse.empty:
                     fig_nse = px.bar(
@@ -3064,16 +3070,8 @@ def render_elasticity_view() -> None:
                     fig_nse.update_layout(showlegend=False)
                     _theme_chart(fig_nse)
                     st.plotly_chart(fig_nse, use_container_width=True)
-
-        st.subheader("Tabla de elasticidades")
-
-        filtered_display = prepare_elasticity_dataframe_for_display(build_elasticity_download(filtered))
-
-        st.dataframe(
-            filtered_display,
-            use_container_width=True,
-            hide_index=True,
-        )
+            with col_t:
+                st.dataframe(nse_summary, use_container_width=True, hide_index=True)
 
         st.subheader("Serie de tiempo de demanda")
 
@@ -3340,6 +3338,16 @@ def render_elasticity_view() -> None:
                     fig,
                     use_container_width=True,
                 )
+
+        st.subheader("Tabla de elasticidades")
+
+        filtered_display = prepare_elasticity_dataframe_for_display(build_elasticity_download(filtered))
+
+        st.dataframe(
+            filtered_display,
+            use_container_width=True,
+            hide_index=True,
+        )
 
     st.subheader("Descarga")
 
