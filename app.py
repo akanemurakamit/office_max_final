@@ -596,6 +596,25 @@ def build_recommendations_cached(
     )
 
 
+def _slim_elasticidades(ep: pd.DataFrame) -> pd.DataFrame:
+    """Devuelve solo las columnas de elasticidades_periodo que necesitan los módulos de pricing.
+    Reduce el tamaño del DataFrame pasado a funciones cacheadas, acelerando el hashing
+    de Streamlit y disminuyendo el uso de memoria durante la computación.
+    """
+    _PRICING_EP_COLS = [
+        "SKU", "categoria", "departamento", "categoria_est_socio",
+        "periodo_tipo", "periodo", "fecha_fin",
+        "elasticidad", "confianza_elasticidad", "recomendable_elasticidad",
+    ]
+    keep = [c for c in _PRICING_EP_COLS if c in ep.columns]
+    slim = ep[keep].copy()
+    # category dtype para columnas de baja cardinalidad
+    for col in ["categoria_est_socio", "periodo_tipo", "confianza_elasticidad"]:
+        if col in slim.columns and slim[col].nunique(dropna=False) <= 30:
+            slim[col] = slim[col].astype("category")
+    return slim
+
+
 @st.cache_data(show_spinner=False, max_entries=5)
 def build_historical_sales_ml_cached(ventas_nse: pd.DataFrame) -> dict:
     """Entrena modelos ML ligeros para entender ventas históricas antes del pronóstico."""
@@ -1533,7 +1552,7 @@ def ensure_historical_pricing_ready() -> bool:
             with st.spinner("Simulando escenarios históricos con ventas reales y elasticidades_periodo..."):
                 pricing_historico_escenarios = simulate_historical_pricing_cached(
                     st.session_state.ventas_nse,
-                    elasticidades_periodo,
+                    _slim_elasticidades(elasticidades_periodo),
                 )
             cache_pr.clear()
             cache_pr[pricing_key] = pricing_historico_escenarios
@@ -1638,7 +1657,7 @@ def ensure_future_pricing_ready() -> bool:
                 price_base = _build_price_base_cached(st.session_state.ventas_nse)
                 pricing_futuro_escenarios = build_future_pricing_cached(
                     demanda_base_futura,
-                    elasticidades_periodo,
+                    _slim_elasticidades(elasticidades_periodo),
                     price_base,
                 )
             cache_pr.clear()
