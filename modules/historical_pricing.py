@@ -99,7 +99,9 @@ def _mode_or_na(series: pd.Series):
 
 def _add_period_columns(ventas: pd.DataFrame, periodo_tipo: str) -> pd.DataFrame:
     out = ventas.copy()
-    out["tran_date"] = parse_transaction_dates(out["tran_date"])
+    # Sólo parsear si aún no es datetime (evita repetirlo cuando se llamó _clean_ventas_financiera)
+    if not pd.api.types.is_datetime64_any_dtype(out["tran_date"]):
+        out["tran_date"] = parse_transaction_dates(out["tran_date"])
     out = out.dropna(subset=["tran_date"])
     out["mes"] = out["tran_date"].dt.to_period("M")
 
@@ -166,50 +168,71 @@ def _find_first_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
     return next((col for col in candidates if col in df.columns), None)
 
 
-def _prepare_historical_financial_base(ventas: pd.DataFrame, periodo_tipo: str) -> pd.DataFrame:
-    ventas = _ensure_sku(ventas)
-    if ventas.empty or "tran_date" not in ventas.columns or "SKU" not in ventas.columns:
+def _clean_ventas_financiera(ventas: pd.DataFrame) -> pd.DataFrame:
+    """
+    Limpieza y enriquecimiento de ventas hecho UNA SOLA VEZ antes de iterar por
+    periodo_tipo. Evita repetir pd.to_numeric y las búsquedas de columnas 4 veces.
+    """
+    v = _ensure_sku(ventas)
+    if v.empty or "tran_date" not in v.columns or "SKU" not in v.columns:
+        return pd.DataFrame()
+    if any(col not in v.columns for col in ["qty", "net_sale"]):
         return pd.DataFrame()
 
-    required = ["qty", "net_sale"]
-    if any(col not in ventas.columns for col in required):
-        return pd.DataFrame()
+    v = v.copy()
+    # Parsear fechas UNA VEZ aquí para que _add_period_columns las encuentre ya convertidas
+    v["tran_date"] = parse_transaction_dates(v["tran_date"])
+    v["qty"] = pd.to_numeric(v["qty"], errors="coerce")
+    v["net_sale"] = pd.to_numeric(v["net_sale"], errors="coerce")
 
-    df = _add_period_columns(ventas, periodo_tipo)
-    df["qty"] = pd.to_numeric(df["qty"], errors="coerce")
-    df["net_sale"] = pd.to_numeric(df["net_sale"], errors="coerce")
+    precio_col = _find_first_column(v, ["precio_unitario", "precio", "price", "unit_price"])
+    v["_precio_unitario"] = (
+        pd.to_numeric(v[precio_col], errors="coerce") if precio_col else pd.Series(np.nan, index=v.index)
+    )
+    v["_precio_unitario"] = v["_precio_unitario"].fillna(v["net_sale"] / v["qty"])
 
-    precio_col = _find_first_column(df, ["precio_unitario", "precio", "price", "unit_price"])
-    if precio_col:
-        df["_precio_unitario"] = pd.to_numeric(df[precio_col], errors="coerce")
+    lista_col = _find_first_column(v, ["precio_lista", "list_price", "precio_regular", "regular_price"])
+    v["_precio_lista_linea"] = (
+        pd.to_numeric(v[lista_col], errors="coerce") if lista_col else pd.Series(np.nan, index=v.index)
+    )
+    v["_precio_lista_linea"] = v["_precio_lista_linea"].fillna(v["_precio_unitario"])
+
+    costo_col = _find_first_column(v, ["costo_unitario", "costo2", "unit_cost", "costo"])
+    v["_costo_unitario"] = (
+        pd.to_numeric(v[costo_col], errors="coerce") if costo_col else pd.Series(np.nan, index=v.index)
+    )
+
+    margen_col = _find_first_column(v, ["margen", "margin", "margen_total"])
+    v["_margen_linea"] = (
+        pd.to_numeric(v[margen_col], errors="coerce") if margen_col else pd.Series(np.nan, index=v.index)
+    )
+    v["_margen_linea"] = v["_margen_linea"].fillna(
+        (v["_precio_unitario"] - v["_costo_unitario"]) * v["qty"]
+    )
+    v["_costo_total"] = v["_costo_unitario"] * v["qty"]
+
+    v = v.replace([np.inf, -np.inf], np.nan)
+    v = v.dropna(subset=["SKU", "qty", "net_sale", "_precio_unitario"])
+    v = v[(v["qty"] > 0) & (v["net_sale"] > 0) & (v["_precio_unitario"] > 0)].copy()
+    return v
+
+
+def _prepare_historical_financial_base(ventas: pd.DataFrame, periodo_tipo: str,
+                                        ventas_clean: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Agrega ventas históricas por SKU-periodo.
+
+    Si se proporciona ``ventas_clean`` (resultado de ``_clean_ventas_financiera``),
+    se salta el pre-procesamiento redundante. Esto evita repetir pd.to_numeric
+    y la búsqueda de columnas cuando se llama para múltiples periodo_tipo.
+    """
+    if ventas_clean is not None and not ventas_clean.empty:
+        df_base = ventas_clean
     else:
-        df["_precio_unitario"] = np.nan
-    df["_precio_unitario"] = df["_precio_unitario"].fillna(df["net_sale"] / df["qty"])
+        df_base = _clean_ventas_financiera(ventas)
+        if df_base.empty:
+            return pd.DataFrame()
 
-    lista_col = _find_first_column(df, ["precio_lista", "list_price", "precio_regular", "regular_price"])
-    if lista_col:
-        df["_precio_lista_linea"] = pd.to_numeric(df[lista_col], errors="coerce")
-    else:
-        df["_precio_lista_linea"] = np.nan
-    df["_precio_lista_linea"] = df["_precio_lista_linea"].fillna(df["_precio_unitario"])
-
-    costo_col = _find_first_column(df, ["costo_unitario", "costo2", "unit_cost", "costo"])
-    if costo_col:
-        df["_costo_unitario"] = pd.to_numeric(df[costo_col], errors="coerce")
-    else:
-        df["_costo_unitario"] = np.nan
-
-    margen_col = _find_first_column(df, ["margen", "margin", "margen_total"])
-    if margen_col:
-        df["_margen_linea"] = pd.to_numeric(df[margen_col], errors="coerce")
-    else:
-        df["_margen_linea"] = np.nan
-    df["_margen_linea"] = df["_margen_linea"].fillna((df["_precio_unitario"] - df["_costo_unitario"]) * df["qty"])
-    df["_costo_total"] = df["_costo_unitario"] * df["qty"]
-
-    df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.dropna(subset=["SKU", "qty", "net_sale", "_precio_unitario"])
-    df = df[(df["qty"] > 0) & (df["net_sale"] > 0) & (df["_precio_unitario"] > 0)]
+    df = _add_period_columns(df_base, periodo_tipo)
     if df.empty:
         return pd.DataFrame()
 
@@ -228,19 +251,27 @@ def _prepare_historical_financial_base(ventas: pd.DataFrame, periodo_tipo: str) 
     )
     agg["precio_real"] = agg["ingreso_real"] / agg["unidades_reales"]
     agg["precio_lista"] = agg["precio_lista"].fillna(agg["precio_real"])
-    agg["costo_unitario"] = np.where(agg["costo_observaciones"].gt(0), agg["costo_total"] / agg["unidades_reales"], np.nan)
+    agg["costo_unitario"] = np.where(
+        agg["costo_observaciones"].gt(0), agg["costo_total"] / agg["unidades_reales"], np.nan
+    )
 
-    for source_col, target_col in [("subdept_nm", "categoria"), ("categoria", "categoria"), ("dept_nm", "departamento"), ("departamento", "departamento")]:
+    for source_col, target_col in [
+        ("subdept_nm", "categoria"), ("categoria", "categoria"),
+        ("dept_nm", "departamento"), ("departamento", "departamento"),
+    ]:
         if source_col in df.columns and target_col not in agg.columns:
-            modes = df.groupby(group_cols, observed=True, sort=False)[source_col].agg(_mode_or_na).reset_index(name=target_col)
+            modes = (
+                df.groupby(group_cols, observed=True, sort=False)[source_col]
+                .agg(_mode_or_na)
+                .reset_index(name=target_col)
+            )
             agg = agg.merge(modes, on=group_cols, how="left")
     if "categoria" not in agg.columns:
         agg["categoria"] = np.nan
     if "departamento" not in agg.columns:
         agg["departamento"] = np.nan
 
-    agg = agg.replace([np.inf, -np.inf], np.nan)
-    return agg
+    return agg.replace([np.inf, -np.inf], np.nan)
 
 
 def _normalize_elasticidades(elasticidades_periodo: pd.DataFrame) -> pd.DataFrame:
@@ -314,7 +345,26 @@ def _build_elasticity_candidates(base: pd.DataFrame, elasticidades_periodo: pd.D
     if not candidates:
         return pd.DataFrame()
     out = pd.concat(candidates, ignore_index=True, sort=False)
-    return out.dropna(subset=["elasticidad_usada"])
+    out = out.dropna(subset=["elasticidad_usada"])
+    if out.empty:
+        return out
+    # Deduplicar: conservar solo la MEJOR fuente por SKU-periodo-NSE para minimizar
+    # la explosión del join cartesiano de escenarios (9×). Prioridad:
+    #   elasticidad_sku_periodo > elasticidad_sku_global > elasticidad_categoria_departamento
+    _fuente_rank = {
+        "elasticidad_sku_periodo": 0,
+        "elasticidad_sku_global": 1,
+        "elasticidad_categoria_departamento": 2,
+    }
+    out["_src_rank"] = out["tipo_elasticidad_usada"].map(_fuente_rank).fillna(9)
+    dedup_key = [c for c in ["SKU", "periodo_tipo", "periodo", "categoria_est_socio"] if c in out.columns]
+    out = (
+        out.sort_values("_src_rank", kind="stable")
+        .drop_duplicates(dedup_key, keep="first")
+        .drop(columns="_src_rank")
+        .reset_index(drop=True)
+    )
+    return out
 
 
 def _recommendation_reason(row: pd.Series) -> tuple[str, str]:
@@ -407,7 +457,17 @@ def build_pricing_historico_escenarios(
         return empty_pricing_historico_escenarios()
 
     periodo_tipos = [p for p in (periodo_tipos or PERIODOS_HISTORICOS) if p in PERIODOS_HISTORICOS]
-    bases = [_prepare_historical_financial_base(ventas_historicas, periodo_tipo) for periodo_tipo in periodo_tipos]
+
+    # Pre-limpiar ventas UNA SOLA VEZ para evitar repetir pd.to_numeric y búsquedas
+    # de columnas en cada llamada a _prepare_historical_financial_base.
+    ventas_clean = _clean_ventas_financiera(ventas_historicas)
+    if ventas_clean.empty:
+        return empty_pricing_historico_escenarios()
+
+    bases = [
+        _prepare_historical_financial_base(ventas_historicas, periodo_tipo, ventas_clean=ventas_clean)
+        for periodo_tipo in periodo_tipos
+    ]
     bases = [base for base in bases if base is not None and not base.empty]
     if not bases:
         return empty_pricing_historico_escenarios()
@@ -473,19 +533,17 @@ def build_pricing_historico_escenarios(
         confianza_elasticidad=sim.get("confianza"),
     )
 
-    group_cols = ["SKU", "periodo_tipo", "periodo", "tipo_elasticidad_usada"]
+    group_cols = [c for c in ["SKU", "periodo_tipo", "periodo", "tipo_elasticidad_usada", "categoria_est_socio"] if c in sim.columns]
     sim["mejor_escenario_historico"] = False
     valid_best = sim.dropna(subset=["ingreso_simulado", "unidades_simuladas"])
     valid_best = valid_best[~(es_promocion(valid_best["tipo_escenario"]) & valid_best["riesgo_promocion"].eq("Alto"))].copy()
     if valid_best["margen_simulado"].notna().any():
         valid_best = valid_best[valid_best["margen_simulado"].notna()].copy()
     if not valid_best.empty:
+        sort_cols = group_cols + ["margen_simulado", "ingreso_simulado", "unidades_simuladas"]
+        sort_asc  = [True] * len(group_cols) + [False, False, False]
         best_idx = (
-            valid_best.sort_values(
-                group_cols + ["margen_simulado", "ingreso_simulado", "unidades_simuladas"],
-                ascending=[True, True, True, True, False, False, False],
-                kind="stable",
-            )
+            valid_best.sort_values(sort_cols, ascending=sort_asc, kind="stable")
             .drop_duplicates(group_cols)
             .index
         )
