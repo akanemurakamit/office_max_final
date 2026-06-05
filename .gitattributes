@@ -1,0 +1,8 @@
+# Treat PDFs and other binary assets as binary so Git never applies
+# line-ending (CRLF/LF) conversion, which would corrupt them on checkout.
+*.pdf binary
+*.parquet binary
+*.xlsx binary
+*.xls binary
+*.png binary
+*.jpg binary
