@@ -2483,26 +2483,25 @@ def render_historical_pricing_view() -> None:
         .reset_index()
     )
     if not chart.empty:
-        ch1, ch2 = st.columns(2)
-        with ch1:
-            chart_long = chart.melt(id_vars="nombre_escenario", var_name="métrica", value_name="monto")
-            fig = px.bar(chart_long, x="nombre_escenario", y="monto", color="métrica", barmode="group",
-                         title="Ingreso y margen: real vs simulado",
-                         color_discrete_sequence=["#FFE566", "#F5C518", "#C49A00", "#FFF0A0"])
-            _theme_chart(fig)
-            st.plotly_chart(fig, use_container_width=True)
-        with ch2:
-            chart_u = (
-                selected.groupby("nombre_escenario", observed=True, sort=False)
-                .agg(unidades_reales=("unidades_reales", "sum"), unidades_simuladas=("unidades_simuladas", "sum"))
-                .reset_index()
-            )
-            chart_u_long = chart_u.melt(id_vars="nombre_escenario", var_name="tipo", value_name="unidades")
-            fig_u = px.bar(chart_u_long, x="nombre_escenario", y="unidades", color="tipo", barmode="group",
-                           title="Unidades vendidas vs proyectadas por escenario",
-                           color_discrete_sequence=["#FFE566", "#F5C518"])
-            _theme_chart(fig_u)
-            st.plotly_chart(fig_u, use_container_width=True)
+        # Gráficas apiladas a ancho completo: primero unidades, luego ingreso/margen.
+        chart_u = (
+            selected.groupby("nombre_escenario", observed=True, sort=False)
+            .agg(unidades_reales=("unidades_reales", "sum"), unidades_simuladas=("unidades_simuladas", "sum"))
+            .reset_index()
+        )
+        chart_u_long = chart_u.melt(id_vars="nombre_escenario", var_name="tipo", value_name="unidades")
+        fig_u = px.bar(chart_u_long, x="nombre_escenario", y="unidades", color="tipo", barmode="group",
+                       title="Unidades vendidas vs proyectadas por escenario",
+                       color_discrete_sequence=["#FFE566", "#F5C518"])
+        _theme_chart(fig_u)
+        st.plotly_chart(fig_u, use_container_width=True)
+
+        chart_long = chart.melt(id_vars="nombre_escenario", var_name="métrica", value_name="monto")
+        fig = px.bar(chart_long, x="nombre_escenario", y="monto", color="métrica", barmode="group",
+                     title="Ingreso y margen: real vs simulado",
+                     color_discrete_sequence=["#FFE566", "#F5C518", "#C49A00", "#FFF0A0"])
+        _theme_chart(fig)
+        st.plotly_chart(fig, use_container_width=True)
 
     render_promociones_historico(selected)
 
