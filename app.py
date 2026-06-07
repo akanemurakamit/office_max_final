@@ -794,14 +794,16 @@ def _safe_sorted_options(df: pd.DataFrame, col: str | None) -> list[str]:
     """Devuelve opciones limpias y ordenadas para filtros dependientes."""
     if df is None or df.empty or col is None or col not in df.columns:
         return []
-    values = (
-        df[col]
-        .dropna()
-        .astype(str)
-        .map(str.strip)
-    )
-    values = values[values != ""]
-    unicos = values.unique().tolist()
+    # Optimización: stringificar/limpiar solo los valores ÚNICOS (no toda la columna).
+    # Para columnas con muchas filas pero pocos valores distintos —el caso típico de
+    # los filtros (departamento, categoría, periodo, escenario, NSE)— esto evita un
+    # astype(str) sobre decenas de miles de filas en cada rerun.
+    seen: dict[str, None] = {}
+    for v in pd.unique(df[col].dropna()):
+        s = str(v).strip()
+        if s:
+            seen[s] = None
+    unicos = list(seen.keys())
     # Para columnas de escenario se usa el orden lógico de precio, no el alfabético.
     if col in {"nombre_escenario", "escenario"}:
         return _sort_escenarios(unicos)
@@ -956,6 +958,39 @@ def _df_to_excel_friendly_csv_bytes(df: pd.DataFrame, sep: str = ",") -> bytes:
         return b""
     clean = df.copy()
     return clean.to_csv(index=False, sep=sep, encoding="utf-8-sig", lineterminator="\n").encode("utf-8-sig")
+
+
+def _deferred_csv_download(label: str, df: pd.DataFrame, file_name: str, key: str, sig: tuple) -> None:
+    """Botón de descarga CSV diferido: serializa SOLO al pulsar 'Preparar CSV'.
+
+    Serializar tablas grandes a CSV en cada rerun (cambio de filtro, entrar a una
+    vista, etc.) es uno de los mayores costos de interacción. Este patrón evita ese
+    costo: el archivo se genera únicamente cuando el usuario lo pide y se guarda en
+    `session_state`. ``sig`` identifica la selección/datos actuales; si cambia, la
+    descarga preparada se invalida y debe prepararse de nuevo.
+    """
+    disponible = isinstance(df, pd.DataFrame) and not df.empty
+    store = st.session_state.setdefault("_dl_store", {})
+    cur = store.get(key)
+    ready = bool(disponible and cur is not None and cur.get("sig") == sig)
+    col_prep, col_dl = st.columns(2)
+    with col_prep:
+        if st.button("Preparar CSV", key=f"prep_{key}", disabled=(not disponible) or ready, use_container_width=True):
+            store[key] = {"sig": sig, "bytes": _df_to_excel_friendly_csv_bytes(df, ",")}
+            cur = store[key]
+            ready = True
+    with col_dl:
+        st.download_button(
+            label,
+            data=(cur["bytes"] if ready else b""),
+            file_name=file_name,
+            mime="text/csv; charset=utf-8",
+            disabled=not ready,
+            key=f"dl_{key}",
+            use_container_width=True,
+        )
+    if disponible and not ready:
+        st.caption("Pulsa **Preparar CSV** para generar el archivo con la selección/datos actuales.")
 
 
 def _dataframes_to_zip_csv_bytes(files: dict[str, pd.DataFrame], sep: str = ",") -> bytes:
@@ -1755,6 +1790,56 @@ def _mejor_escenario_por_sku(selected: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(filas)
 
 
+def _kpi_mejor_escenario(df_sin_escenario: pd.DataFrame) -> tuple[str, str]:
+    """Valor del KPI 'Mejor escenario' para pricing futuro.
+
+    Depende de TODOS los filtros excepto el de escenario (recibe el frame ya
+    filtrado por horizonte/departamento/SKU/NSE, sin filtrar por escenario), por lo
+    que NO cambia al elegir un escenario distinto en el filtro.
+
+    - Para una sola combinación (p. ej. un SKU): devuelve su mejor escenario,
+      determinado por el motor según ingreso/margen/unidades.
+    - Para varias: devuelve la moda del mejor escenario entre ellas.
+
+    Es totalmente vectorizado (sin bucles por grupo) para no penalizar la
+    velocidad de la vista al cambiar filtros.
+    """
+    if df_sin_escenario is None or df_sin_escenario.empty or "nombre_escenario" not in df_sin_escenario.columns:
+        return "Sin datos", "Selecciona filtros con datos"
+
+    df = df_sin_escenario
+    n_sku = int(df["SKU"].nunique()) if "SKU" in df.columns else 1
+
+    # Caso normal: usar los escenarios que el motor marcó como óptimos
+    # (mejor_escenario == True), que ya maximizan margen/ingreso/unidades por SKU.
+    if "mejor_escenario" in df.columns:
+        best_rows = df[df["mejor_escenario"].fillna(False).astype(bool)]
+        nombres = best_rows["nombre_escenario"].dropna().astype(str)
+        nombres = nombres[nombres.ne("") & nombres.ne("Sin dato")]
+        if not nombres.empty:
+            moda = nombres.mode()
+            valor = moda.iloc[0] if not moda.empty else nombres.iloc[0]
+            sub = "Mejor por ingreso/margen/unidades" if n_sku <= 1 else f"Moda del mejor escenario · {n_sku} SKUs"
+            return valor, sub
+
+    # Fallback: ningún escenario marcado como óptimo → elegir el mejor por
+    # margen, luego ingreso y unidades simuladas (mismo criterio del motor).
+    rank = df.copy()
+    for col in ["margen_simulado", "ingreso_simulado", "unidades_simuladas"]:
+        rank[col] = pd.to_numeric(rank.get(col), errors="coerce")
+    rank = rank[rank["unidades_simuladas"].fillna(0) > 0]
+    if rank.empty:
+        return "Sin datos", "Sin escenario recomendable"
+    rank["_score"] = rank["margen_simulado"].fillna(rank["ingreso_simulado"])
+    rank = rank.sort_values(
+        ["_score", "ingreso_simulado", "unidades_simuladas"],
+        ascending=False, na_position="last", kind="stable",
+    )
+    valor = str(rank.iloc[0]["nombre_escenario"])
+    sub = "Mejor por ingreso/margen/unidades" if n_sku <= 1 else f"Mejor escenario · {n_sku} SKUs"
+    return valor, sub
+
+
 def _render_mejor_escenario_detalle(selected: pd.DataFrame) -> None:
     """Muestra el mejor escenario por SKU de forma estática (uno por cada SKU).
 
@@ -1860,20 +1945,18 @@ def _render_graficas_futuro(selected: pd.DataFrame) -> None:
         _theme_chart(fig)
         st.plotly_chart(fig, use_container_width=True)
 
-    g1, g2 = st.columns(2)
-    with g1:
-        _grafica_comparativa(
-            "margen_base", "margen_simulado", "Margen base", "Margen proyectado",
-            "Margen: base vs proyectado por escenario", "Margen",
-        )
-    with g2:
-        _grafica_comparativa(
-            "ingreso_base", "ingreso_simulado", "Ingreso base", "Ingreso proyectado",
-            "Ingreso: base vs proyectado por escenario", "Ingreso",
-        )
+    # Tres gráficas apiladas a ancho completo (una sobre otra) para mayor visibilidad.
     _grafica_comparativa(
         "demanda_base", "unidades_simuladas", "Unidades base", "Unidades proyectadas",
         "Unidades: base vs proyectado por escenario", "Unidades",
+    )
+    _grafica_comparativa(
+        "ingreso_base", "ingreso_simulado", "Ingreso base", "Ingreso proyectado",
+        "Ingreso: base vs proyectado por escenario", "Ingreso",
+    )
+    _grafica_comparativa(
+        "margen_base", "margen_simulado", "Margen base", "Margen proyectado",
+        "Margen: base vs proyectado por escenario", "Margen",
     )
 
 
@@ -1994,6 +2077,8 @@ def render_future_pricing_view() -> None:
     df_esc = _filter_fast(df_s, "nombre_escenario", escenario)
     nse = _dependent_selectbox("NSE", ["Todos"] + _safe_sorted_options(df_esc, "categoria_est_socio"), "future_pricing_nse", "Todos", f5)
     selected = _filter_fast(df_esc, "categoria_est_socio", nse)
+    # Frame con todos los filtros EXCEPTO escenario (para el KPI de mejor escenario).
+    selected_sin_escenario = _filter_fast(df_s, "categoria_est_socio", nse)
 
     if selected.empty:
         st.warning("No hay resultados para la combinación de filtros seleccionada.")
@@ -2007,8 +2092,9 @@ def render_future_pricing_view() -> None:
     with k3:
         render_kpi_card("Margen simulado", format_money(selected["margen_simulado"].sum()), "Futuro")
     with k4:
-        pct_reco = (selected["recomendacion"].eq("Recomendar").mean() * 100) if "recomendacion" in selected.columns else 0
-        render_kpi_card("Escenarios recomendados", f"{pct_reco:.1f}%", "Dentro del filtro")
+        # Mejor escenario: NO depende del filtro "escenario"; reacciona al resto de filtros.
+        valor_best, sub_best = _kpi_mejor_escenario(selected_sin_escenario)
+        render_kpi_card("Mejor escenario", valor_best, sub_best)
 
     st.subheader("Mejor escenario por SKU")
     _render_mejor_escenario_detalle(selected)
@@ -2138,9 +2224,10 @@ def render_recommendations_view() -> None:
     nse = _dependent_selectbox("NSE", ["Todos"] + _safe_sorted_options(df_d, "categoria_est_socio"), "reco_nse", "Todos", f3)
     df_nse = _filter_fast(df_d, "categoria_est_socio", nse)
     # El horizonte se muestra explícitamente como 1 mes / 3 meses / Ambos.
-    # "Ambos" equivale a no filtrar por horizonte.
-    horizontes_disponibles = [h for h in ["1 mes", "3 meses"] if h in _safe_sorted_options(df_nse, "horizonte")]
-    horizonte = _dependent_selectbox("Horizonte", ["Ambos"] + horizontes_disponibles, "reco_horizonte", "Ambos", f4)
+    # "Ambos" equivale a no filtrar por horizonte. Se ofrecen siempre las tres
+    # opciones; si un horizonte no tiene datos, la selección mostrará el aviso de
+    # "sin datos" en lugar de ocultar la opción.
+    horizonte = _dependent_selectbox("Horizonte", ["Ambos", "1 mes", "3 meses"], "reco_horizonte", "Ambos", f4)
     df_h = df_nse if horizonte == "Ambos" else _filter_fast(df_nse, "horizonte", horizonte)
     cat_reco = _dependent_selectbox("Recomendación", ["Todos"] + _safe_sorted_options(df_h, "categoria_recomendacion"), "reco_cat_reco", "Todos", f5)
     df_r = _filter_fast(df_h, "categoria_recomendacion", cat_reco)
@@ -2212,23 +2299,20 @@ def render_exportables_view() -> None:
         ("recomendaciones_sku.csv", "recomendaciones_sku", "Recomendaciones por SKU"),
     ]
 
+    st.caption(
+        "Entrar a esta vista ya no genera los CSV automáticamente (por eso carga rápido). "
+        "Pulsa **Preparar CSV** en la tabla que necesites y luego **Descargar**."
+    )
     for file_name, state_key, label in exportables:
         df = st.session_state.get(state_key, pd.DataFrame())
-        col_a, col_b = st.columns([3, 2])
-        with col_a:
-            disponible = isinstance(df, pd.DataFrame) and not df.empty
-            estado = f"✅ {len(df)} filas" if disponible else "⏳ aún no generada"
-            st.markdown(f"**{label}** — `{file_name}` · {estado}")
-        with col_b:
-            st.download_button(
-                f"Descargar {file_name}",
-                data=_df_to_excel_friendly_csv_bytes(df if isinstance(df, pd.DataFrame) else pd.DataFrame(), sep=","),
-                file_name=file_name,
-                mime="text/csv; charset=utf-8",
-                use_container_width=True,
-                disabled=not (isinstance(df, pd.DataFrame) and not df.empty),
-                key=f"export_{state_key}",
-            )
+        disponible = isinstance(df, pd.DataFrame) and not df.empty
+        estado = f"✅ {len(df):,} filas" if disponible else "⏳ aún no generada"
+        st.markdown(f"**{label}** — `{file_name}` · {estado}")
+        # sig basada en identidad+forma del objeto: estable entre reruns mientras la
+        # tabla no se recalcule; cambia (invalida) cuando se regenera en su vista.
+        sig = (id(df), tuple(df.shape)) if disponible else (0,)
+        _deferred_csv_download(f"Descargar {file_name}", df, file_name, key=f"export_{state_key}", sig=sig)
+        st.divider()
 
 
 def _ventas_fase_promocion(ventas_nse: pd.DataFrame, ventanas: pd.DataFrame, sku: str) -> pd.DataFrame:
@@ -2422,8 +2506,18 @@ def render_historical_pricing_view() -> None:
     df_periodo = _filter_fast(df_tipo, "periodo", periodo)
 
     f5, f6, f7, f8 = st.columns(4)
-    sku = _dependent_selectbox("SKU", ["Todos"] + _safe_sorted_options(df_periodo, "SKU"), "hist_pricing_sku", "Todos", f5)
-    df_sku = _filter_fast(df_periodo, "SKU", sku)
+    # SKU como multiselección: permite elegir uno, varios o ninguno (= todos).
+    sku_opts = _safe_sorted_options(df_periodo, "SKU")
+    # Sanea selecciones previas que ya no existen tras cambiar filtros superiores,
+    # para evitar el error de Streamlit "default value not in options".
+    if "hist_pricing_sku" in st.session_state:
+        st.session_state["hist_pricing_sku"] = [s for s in st.session_state["hist_pricing_sku"] if s in sku_opts]
+    with f5:
+        skus = st.multiselect("SKU", sku_opts, key="hist_pricing_sku", placeholder="Todos")
+    if skus:
+        df_sku = df_periodo[df_periodo["SKU"].astype(str).isin([str(s) for s in skus])]
+    else:
+        df_sku = df_periodo
 
     nse = _dependent_selectbox("NSE", ["Todos"] + _safe_sorted_options(df_sku, "categoria_est_socio"), "hist_pricing_nse", "Todos", f6)
     df_nse = _filter_fast(df_sku, "categoria_est_socio", nse)
@@ -2515,19 +2609,22 @@ def render_historical_pricing_view() -> None:
         "variacion_margen", "recomendacion_historica", "confianza", "razon_recomendacion",
     ]
     display_df = selected[[col for col in table_cols if col in selected.columns]]
-    MAX_DISPLAY_ROWS = 5_000
+    # Vista previa acotada para que cambiar filtros sea ágil: renderizar miles de
+    # filas en pantalla es el principal costo por rerun. La tabla completa siempre
+    # está disponible en el CSV de descarga de abajo.
+    MAX_DISPLAY_ROWS = 500
     if len(display_df) > MAX_DISPLAY_ROWS:
-        st.caption(f"Mostrando {MAX_DISPLAY_ROWS:,} de {len(display_df):,} filas. Usa los filtros para reducir la selección o descarga el CSV completo.")
+        st.caption(f"Vista previa de {MAX_DISPLAY_ROWS:,} de {len(display_df):,} filas. Filtra (p. ej. por SKU) o descarga el CSV completo abajo.")
         display_df = display_df.head(MAX_DISPLAY_ROWS)
     st.dataframe(display_df, use_container_width=True)
 
     st.subheader("Descarga")
-    st.download_button(
+    _deferred_csv_download(
         "Descargar pricing_historico_escenarios filtrado",
-        data=_df_to_excel_friendly_csv_bytes(selected, sep=","),
-        file_name="pricing_historico_escenarios.csv",
-        mime="text/csv; charset=utf-8",
-        use_container_width=True,
+        selected,
+        "pricing_historico_escenarios.csv",
+        key="hist_pricing_dl",
+        sig=(departamento, categoria, periodo_tipo, periodo, tuple(skus), nse, tipo_elasticidad, escenario),
     )
 
 def require_processed() -> bool:
@@ -2667,25 +2764,80 @@ def render_quality_view() -> None:
             st.warning(ml_summary.get("message", "No se pudo entrenar el análisis histórico con ML."))
         else:
             st.success(ml_summary.get("message", "Modelos históricos entrenados correctamente."))
+            import plotly.express as px
+
+            # --- Resumen de la base de entrenamiento como KPIs (no tabla) ---
             summary_df = ml_summary.get("dataset_summary", pd.DataFrame())
             if summary_df is not None and not summary_df.empty:
-                st.caption("Base de entrenamiento SKU-mes usada antes de cualquier pronóstico.")
-                st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                s = summary_df.iloc[0]
+                cN, cS, cP = st.columns(3)
+                with cN:
+                    render_kpi_card("Observaciones", f"{int(s.get('observaciones_sku_mes', 0)):,}", "Meses-SKU de entrenamiento")
+                with cS:
+                    render_kpi_card("SKUs / periodos", f"{int(s.get('skus', 0)):,}", f"{int(s.get('periodos', 0)):,} periodos")
+                with cP:
+                    alta = int(s.get("venta_alta", 0)); baja = int(s.get("venta_baja", 0)); tot = max(alta + baja, 1)
+                    render_kpi_card("Meses de venta alta", f"{alta / tot * 100:.0f}%", f"{alta:,} alta · {baja:,} baja")
 
+            # --- Desempeño de los modelos como gráfica de barras ---
             metrics_df = ml_summary.get("metrics", pd.DataFrame())
             if metrics_df is not None and not metrics_df.empty:
-                st.caption("Desempeño comparativo de los modelos históricos.")
-                st.dataframe(metrics_df, use_container_width=True, hide_index=True)
+                st.markdown("**¿Qué tan bien predicen los modelos?** Barras más altas = mejor (escala 0 a 1).")
+                etiquetas = {"accuracy": "Exactitud", "balanced_accuracy": "Exactitud balanceada", "roc_auc": "ROC-AUC"}
+                m_long = metrics_df.melt(id_vars="modelo", var_name="métrica", value_name="valor")
+                m_long = m_long[m_long["métrica"].isin(etiquetas)].copy()
+                m_long["métrica"] = m_long["métrica"].map(etiquetas)
+                m_long["valor"] = pd.to_numeric(m_long["valor"], errors="coerce")
+                fig_m = px.bar(
+                    m_long.dropna(subset=["valor"]), x="modelo", y="valor", color="métrica",
+                    barmode="group", title="Desempeño comparativo de los modelos",
+                    color_discrete_sequence=_CHART_COLORS, text_auto=".2f",
+                )
+                fig_m.update_yaxes(range=[0, 1])
+                fig_m.update_layout(yaxis_title="Puntaje (0–1)", xaxis_title="", legend_title="")
+                _theme_chart(fig_m)
+                st.plotly_chart(fig_m, use_container_width=True)
 
+            # --- Variables más explicativas como barras horizontales por modelo ---
             importance_df = ml_summary.get("feature_importance", pd.DataFrame())
             if importance_df is not None and not importance_df.empty:
-                st.caption("Variables que más explican el comportamiento histórico según cada modelo.")
-                st.dataframe(importance_df, use_container_width=True, hide_index=True)
+                st.markdown(
+                    "**¿Qué variables explican mejor los meses de venta alta vs. baja?** "
+                    "Barra más larga = variable más influyente para ese modelo."
+                )
+                imp = importance_df.copy()
+                # Nombres legibles: quita prefijos técnicos del preprocesador (num__/cat__).
+                imp["variable"] = imp["variable"].astype(str).str.replace(r"^(num|cat|remainder)__", "", regex=True)
+                imp = imp.sort_values(["modelo", "importancia"], ascending=[True, True])
+                fig_i = px.bar(
+                    imp, x="importancia", y="variable", color="modelo", orientation="h",
+                    facet_col="modelo", title="Variables más influyentes por modelo",
+                    color_discrete_sequence=_CHART_COLORS,
+                )
+                fig_i.update_xaxes(matches=None, showticklabels=True)
+                fig_i.update_yaxes(matches=None)
+                fig_i.update_layout(showlegend=False, yaxis_title="", xaxis_title="Importancia")
+                fig_i.for_each_annotation(lambda a: a.update(text=a.text.split("=")[-1]))
+                _theme_chart(fig_i)
+                st.plotly_chart(fig_i, use_container_width=True)
 
+            # --- Segmentos con mayor probabilidad de venta alta como barras ---
             segments_df = ml_summary.get("segments", pd.DataFrame())
-            if segments_df is not None and not segments_df.empty:
-                st.caption("Segmentos con mayor probabilidad histórica de venta alta.")
-                st.dataframe(segments_df, use_container_width=True, hide_index=True)
+            if (
+                segments_df is not None and not segments_df.empty
+                and {"segmento", "probabilidad_venta_alta"}.issubset(segments_df.columns)
+            ):
+                st.markdown("**Segmentos con mayor probabilidad histórica de venta alta**")
+                seg = segments_df.sort_values("probabilidad_venta_alta", ascending=True).tail(12)
+                fig_s = px.bar(
+                    seg, x="probabilidad_venta_alta", y="segmento", orientation="h",
+                    title="Probabilidad de venta alta por segmento",
+                    color="probabilidad_venta_alta",
+                    color_continuous_scale=["#3A3A3A", "#C49A00", "#F5C518"],
+                )
+                fig_s.update_layout(xaxis_title="Probabilidad de venta alta", yaxis_title="", coloraxis_showscale=False)
+                _theme_chart(fig_s)
+                st.plotly_chart(fig_s, use_container_width=True)
 
     st.subheader("Vista previa de ventas_limpias")
     st.dataframe(ventas.head(MAX_ROWS_PREVIEW), use_container_width=True)
@@ -2788,65 +2940,6 @@ def render_elasticity_view() -> None:
             La columna **periodo_tipo** identifica si el registro es mensual, trimestral, semestral, anual, global SKU o categoría/departamento.
             """
         )
-
-    st.subheader("Resumen de disponibilidad")
-
-    resumen = (
-        df_periodo.groupby("periodo_tipo", dropna=False)
-        .agg(
-            registros=("periodo_tipo", "size"),
-            skus_unicos=("SKU", "nunique"),
-            alta=("confianza_elasticidad", lambda s: (s == "Alta").sum()),
-            media=("confianza_elasticidad", lambda s: (s == "Media").sum()),
-            baja=("confianza_elasticidad", lambda s: (s == "Baja").sum()),
-            no_usable=("confianza_elasticidad", lambda s: (s == "No usable").sum()),
-        )
-        .reset_index()
-        .rename(
-            columns={
-                "periodo_tipo": "periodo_tipo",
-                "registros": "número de registros",
-                "skus_unicos": "número de SKUs únicos",
-                "alta": "confianza Alta",
-                "media": "confianza Media",
-                "baja": "confianza Baja",
-                "no_usable": "No usable",
-            }
-        )
-    )
-
-    st.dataframe(
-        prepare_dataframe_for_streamlit(resumen),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    recomendables_raw = df_periodo.get("recomendable_elasticidad", pd.Series(False, index=df_periodo.index))
-    if recomendables_raw.dtype == "object" or str(recomendables_raw.dtype).startswith("string"):
-        recomendables = recomendables_raw.fillna("").astype(str).str.strip().str.lower().isin(["true", "1", "sí", "si", "yes"])
-    else:
-        recomendables = recomendables_raw.fillna(False).astype(bool)
-
-    m1, m2, m3, m4, m5 = st.columns(5)
-
-    with m1:
-        render_kpi_card("Total registros", f"{len(df_periodo):,}", "elasticidades_periodo")
-
-    with m2:
-        render_kpi_card(
-            "Tipos incluidos",
-            f"{df_periodo['periodo_tipo'].nunique():,}",
-            ", ".join(sorted(df_periodo["periodo_tipo"].unique())),
-        )
-
-    with m3:
-        render_kpi_card("SKUs únicos", f"{df_periodo['SKU'].nunique():,}", "Incluye grupos categoría/depto")
-
-    with m4:
-        render_kpi_card("Recomendables", f"{int(recomendables.sum()):,}", "confianza Media/Alta")
-
-    with m5:
-        render_kpi_card("No recomendables", f"{int((~recomendables).sum()):,}", "Baja o No usable")
 
     # =====================================================
     # Filtros únicos de elasticidad

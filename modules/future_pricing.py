@@ -429,8 +429,10 @@ def build_pricing_futuro_escenarios(
     sim["variacion_ingreso"] = sim["ingreso_simulado"] - sim["ingreso_base"]
     sim["variacion_margen"] = sim["margen_simulado"] - sim["margen_base"]
 
-    sim["confianza_elasticidad"] = sim["confianza_elasticidad"].fillna("No usable")
-    sim["confianza_demanda"] = sim["confianza_demanda"].fillna("No usable")
+    # astype(object) evita el error "Cannot setitem on a Categorical with a new
+    # category": confianza_elasticidad puede llegar como `category` desde _slim_elasticidades.
+    sim["confianza_elasticidad"] = sim["confianza_elasticidad"].astype(object).fillna("No usable")
+    sim["confianza_demanda"] = sim["confianza_demanda"].astype(object).fillna("No usable")
 
     # Confianza final: mínimo de elasticidad y demanda — vectorizado
     _rank_map = {"alta": 3, "media": 2, "baja": 1}
@@ -519,6 +521,11 @@ def build_pricing_futuro_escenarios(
     sim["descuento_efectivo"] = sim["descuento_efectivo"] * 100
 
     sim["mejor_escenario"] = sim["mejor_escenario"].fillna(False).astype(bool)
+    # Garantiza que existan todas las columnas de salida aunque la base de
+    # elasticidades no traiga, p. ej., categoria_est_socio (sin estratificación NSE).
+    for col in PRICING_FUTURO_ESCENARIOS_COLUMNS:
+        if col not in sim.columns:
+            sim[col] = np.nan
     out = sim[PRICING_FUTURO_ESCENARIOS_COLUMNS].replace([np.inf, -np.inf], np.nan)
     # Mantiene la tabla libre de NaN/inf en columnas críticas y evita romper SKUs insuficientes.
     numeric_cols = out.select_dtypes(include=[np.number]).columns
@@ -526,6 +533,11 @@ def build_pricing_futuro_escenarios(
     out[fill_numeric_cols] = out[fill_numeric_cols].fillna(0.0)
     # mejor_escenario es booleano y no debe convertirse a texto "Sin dato".
     object_cols = [col for col in out.columns if col not in numeric_cols and col != "mejor_escenario"]
-    out[object_cols] = out[object_cols].fillna("Sin dato")
+    # Se castea a object antes del fillna: algunas columnas llegan como `category`
+    # (p. ej. categoria_est_socio / confianza_elasticidad vienen de _slim_elasticidades)
+    # y rellenar una categoría nueva ("Sin dato") sobre un Categorical lanza error.
+    # _optimize_memory vuelve a categorizar las columnas de baja cardinalidad después.
+    if object_cols:
+        out[object_cols] = out[object_cols].astype(object).fillna("Sin dato")
     out = out.sort_values(["horizonte", "metodo_proyeccion", "SKU", "tipo_elasticidad_usada", "cambio_precio_pct"]).reset_index(drop=True)
     return _optimize_memory(out)

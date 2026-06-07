@@ -229,55 +229,53 @@ def build_historical_sales_ml_summary(ventas: pd.DataFrame) -> dict:
         )
 
     preprocessor = ColumnTransformer(transformers=transformers)
-    logistic = Pipeline(
-        steps=[
-            ("preprocessor", preprocessor),
-            (
-                "model",
-                LogisticRegression(
-                    max_iter=1000, class_weight="balanced", random_state=42
-                ),
-            ),
-        ]
-    )
-    forest = Pipeline(
-        steps=[
-            ("preprocessor", preprocessor),
-            (
-                "model",
-                RandomForestClassifier(
-                    n_estimators=120,
-                    max_depth=6,
-                    min_samples_leaf=max(2, int(np.ceil(len(monthly) * 0.01))),
-                    random_state=42,
-                    class_weight="balanced_subsample",
-                    n_jobs=-1,
-                ),
-            ),
-        ]
-    )
 
-    models = [("Regresión logística", logistic), ("Random Forest", forest)]
+    # Optimización de rendimiento (sin alterar resultados): el ColumnTransformer se
+    # ajusta UNA sola vez y las matrices transformadas se reutilizan para ambos
+    # modelos, en lugar de re-ajustar y re-transformar el preprocesador dentro de dos
+    # Pipelines. Las transformaciones (imputación, one-hot, escalado) son
+    # deterministas, por lo que las predicciones y métricas son idénticas.
+    preprocessor.fit(X_train, y_train)
+    X_train_t = preprocessor.transform(X_train)
+    X_test_t = preprocessor.transform(X_test)
+    X_all_t = preprocessor.transform(X)
+    feature_names = _feature_names(preprocessor)
+
+    models = [
+        (
+            "Regresión logística",
+            LogisticRegression(max_iter=1000, class_weight="balanced", random_state=42),
+        ),
+        (
+            "Random Forest",
+            RandomForestClassifier(
+                n_estimators=120,
+                max_depth=6,
+                min_samples_leaf=max(2, int(np.ceil(len(monthly) * 0.01))),
+                random_state=42,
+                class_weight="balanced_subsample",
+                n_jobs=-1,
+            ),
+        ),
+    ]
     metrics = []
     importances = []
     scored = monthly.copy()
 
-    for model_name, pipeline in models:
-        pipeline.fit(X_train, y_train)
-        predictions = pipeline.predict(X_test)
-        probability = pipeline.predict_proba(X_test)[:, 1]
+    for model_name, model in models:
+        model.fit(X_train_t, y_train)
+        predictions = model.predict(X_test_t)
+        probability = model.predict_proba(X_test_t)[:, 1]
         metrics.append(_metric_row(model_name, y_test, predictions, probability))
         scored[
             f"prob_venta_alta_{model_name.lower().replace(' ', '_').replace('ó', 'o')}"
-        ] = pipeline.predict_proba(X)[:, 1]
+        ] = model.predict_proba(X_all_t)[:, 1]
 
-        names = _feature_names(pipeline.named_steps["preprocessor"])
-        model = pipeline.named_steps["model"]
         if hasattr(model, "coef_"):
             values = model.coef_[0]
         else:
             values = model.feature_importances_
-        importances.append(_feature_importance_frame(model_name, names, values))
+        importances.append(_feature_importance_frame(model_name, feature_names, values))
 
     prob_cols = [col for col in scored.columns if col.startswith("prob_venta_alta_")]
     segment_cols = [
