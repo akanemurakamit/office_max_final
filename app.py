@@ -811,9 +811,23 @@ def _safe_sorted_options(df: pd.DataFrame, col: str | None) -> list[str]:
 
 
 def _filter_fast(df: pd.DataFrame, col: str | None, value: object) -> pd.DataFrame:
-    """Filtro ligero para cascadas de Streamlit sin copiar todo el DataFrame si no hace falta."""
+    """Filtro ligero para cascadas de Streamlit sin copiar todo el DataFrame si no hace falta.
+
+    Para columnas de texto/categóricas (el caso de todos los filtros) compara
+    directamente contra el valor en lugar de convertir TODA la columna a str con
+    ``astype(str)``. En tablas grandes (p. ej. pricing histórico, millones de filas)
+    ese astype materializa un arreglo de strings completo en cada filtro —un pico de
+    memoria que puede tumbar el proceso— y aquí se evita. El resultado es equivalente
+    porque las opciones provienen de los mismos valores de la columna.
+    """
     if df is None or df.empty or col is None or col not in df.columns or value in [None, "Todos", "Todas"]:
         return df
+    s = df[col]
+    if isinstance(s.dtype, pd.CategoricalDtype) or s.dtype == object or pd.api.types.is_string_dtype(s):
+        mask = s.eq(value)
+        if mask.dtype != bool:  # dtype nullable (p. ej. string) con posibles NA
+            mask = mask.fillna(False).astype(bool)
+        return df.loc[mask]
     return df.loc[df[col].astype(str) == str(value)]
 
 
@@ -2608,14 +2622,18 @@ def render_historical_pricing_view() -> None:
         "margen_real", "margen_simulado", "variacion_unidades", "variacion_ingreso",
         "variacion_margen", "recomendacion_historica", "confianza", "razon_recomendacion",
     ]
-    display_df = selected[[col for col in table_cols if col in selected.columns]]
-    # Vista previa acotada para que cambiar filtros sea ágil: renderizar miles de
-    # filas en pantalla es el principal costo por rerun. La tabla completa siempre
-    # está disponible en el CSV de descarga de abajo.
+    # Vista previa acotada para que abrir la vista y cambiar filtros sea ágil y use
+    # poca memoria: se recortan las filas ANTES de seleccionar columnas (evita
+    # materializar millones de filas × decenas de columnas). La tabla completa
+    # siempre está disponible en el CSV de descarga de abajo.
+    cols_present = [col for col in table_cols if col in selected.columns]
     MAX_DISPLAY_ROWS = 500
-    if len(display_df) > MAX_DISPLAY_ROWS:
-        st.caption(f"Vista previa de {MAX_DISPLAY_ROWS:,} de {len(display_df):,} filas. Filtra (p. ej. por SKU) o descarga el CSV completo abajo.")
-        display_df = display_df.head(MAX_DISPLAY_ROWS)
+    total_rows = len(selected)
+    if total_rows > MAX_DISPLAY_ROWS:
+        st.caption(f"Vista previa de {MAX_DISPLAY_ROWS:,} de {total_rows:,} filas. Filtra (p. ej. por SKU) o descarga el CSV completo abajo.")
+        display_df = selected.head(MAX_DISPLAY_ROWS)[cols_present]
+    else:
+        display_df = selected[cols_present]
     st.dataframe(display_df, use_container_width=True)
 
     st.subheader("Descarga")
